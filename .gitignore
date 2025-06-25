@@ -16,3 +16,5 @@ __pycache__/
 .venv/
 temp.py
 conversation_logs/
+.env
+*.rtf
