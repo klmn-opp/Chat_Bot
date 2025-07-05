@@ -1,0 +1,15 @@
+2025-07-05 20:41:38,793 - main - INFO - ==================================================
+2025-07-05 20:41:38,793 - main - INFO - 🤖 智护夜巡 - 流式对话版
+2025-07-05 20:41:38,793 - main - INFO - Stream v2.0 - 本地Whisper版本
+2025-07-05 20:41:38,793 - main - INFO - ==================================================
+2025-07-05 20:41:38,793 - environment_check - INFO - 🔍 检查运行环境...
+2025-07-05 20:41:40,263 - environment_check - INFO - ✅ 核心依赖检查通过
+2025-07-05 20:41:40,263 - main - INFO - ✅ 运行环境检查通过
+2025-07-05 20:41:40,264 - main - ERROR - ❌ 程序运行错误: No module named 'src.ui.medical_robot_stream_ui'
+2025-07-05 20:41:40,264 - main - ERROR - Traceback (most recent call last):
+  File "/Users/ruarua/比赛资料/机器人之梦/talktalk/main.py", line 79, in main
+    from src.ui.medical_robot_stream_ui import MedicalRobotStreamUI
+  File "/Users/ruarua/比赛资料/机器人之梦/talktalk/src/ui/__init__.py", line 6, in <module>
+    from .medical_robot_stream_ui import MedicalRobotStreamUI
+ModuleNotFoundError: No module named 'src.ui.medical_robot_stream_ui'
+
