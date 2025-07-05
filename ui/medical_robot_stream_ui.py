@@ -60,7 +60,6 @@ class MedicalRobotStreamUI:
         self.stream_controller.set_final_result_callback(self.on_final_result)
         self.stream_controller.set_ai_response_callback(self.on_ai_response)
         self.stream_controller.set_error_callback(self.on_error)
-
     
     def create_widgets(self):
         """创建现代化UI界面"""
