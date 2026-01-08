@@ -88,7 +88,7 @@ class MedicalRobotStreamUI:
         header_frame.pack(fill=tk.X, pady=(0, 20))
         
         # 主标题
-        title_font = tkfont.Font(family="Microsoft YaHei", size=28, weight="bold")
+        title_font = tkfont.Font(family="TkDefaultFont", size=28, weight="bold")
         title_label = ttk.Label(
             header_frame,
             text="🤖 智护夜巡",
@@ -98,7 +98,7 @@ class MedicalRobotStreamUI:
         title_label.pack(side=tk.LEFT)
         
         # 副标题
-        subtitle_font = tkfont.Font(family="Microsoft YaHei", size=12)
+        subtitle_font = tkfont.Font(family="TkDefaultFont", size=12)
         subtitle_label = ttk.Label(
             header_frame,
             text="实时语音对话系统",
@@ -111,7 +111,7 @@ class MedicalRobotStreamUI:
         version_label = ttk.Label(
             header_frame,
             text="Stream v2.0",
-            font=("Microsoft YaHei", 10),
+            font=("TkDefaultFont", 10),
             foreground="#95a5a6"
         )
         version_label.pack(side=tk.RIGHT)
@@ -132,7 +132,7 @@ class MedicalRobotStreamUI:
         self.status_text = ttk.Label(
             status_frame,
             text="🎤 点击开始对话",
-            font=("Microsoft YaHei", 12, "bold"),
+            font=("TkDefaultFont", 12, "bold"),
             foreground="#34C759"
         )
         self.status_text.pack(side=tk.LEFT)
@@ -141,7 +141,7 @@ class MedicalRobotStreamUI:
         self.language_indicator = ttk.Label(
             status_frame,
             text=f"语言: {self.current_language}",
-            font=("Microsoft YaHei", 10),
+            font=("TkDefaultFont", 10),
             foreground="#7f8c8d"
         )
         self.language_indicator.pack(side=tk.RIGHT)
@@ -156,8 +156,10 @@ class MedicalRobotStreamUI:
             chat_frame,
             wrap=tk.WORD,
             width=100,
-            height=30,
-            font=("Microsoft YaHei", 12),
+            # 在部分 Windows 设备上，过大的初始高度会把底部按钮挤出可视区域
+            # 调整为更保守的高度，配合 pack(fill=BOTH, expand=True) 自适应伸缩
+            height=15,
+            font=("TkDefaultFont", 12),
             bg="#ffffff",
             fg="#2c3e50",
             padx=15,
@@ -232,7 +234,7 @@ class MedicalRobotStreamUI:
         self.bottom_status = ttk.Label(
             status_bar,
             text="就绪 | Docker状态: 连接中...",
-            font=("Microsoft YaHei", 9),
+            font=("TkDefaultFont", 9),
             foreground="#7f8c8d"
         )
         self.bottom_status.pack(side=tk.LEFT, padx=5, pady=2)
@@ -241,7 +243,7 @@ class MedicalRobotStreamUI:
         copyright_label = ttk.Label(
             status_bar,
             text="© 2024 智护夜巡团队",
-            font=("Microsoft YaHei", 8),
+            font=("TkDefaultFont", 8),
             foreground="#bdc3c7"
         )
         copyright_label.pack(side=tk.RIGHT, padx=5, pady=2)
