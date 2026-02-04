@@ -1,0 +1,15 @@
+requests>=2.25.1
+python-dotenv>=0.19.0
+edge-tts>=6.1.7
+pyaudio>=0.2.11
+# Pin NumPy below 2.0 to avoid binary-incompatible numba wheels
+numpy<2.0,>=1.23
+openai-whisper>=20231117
+pydub>=0.25.1
+
+# Note: whisper depends on numba; keeping numpy<2 ensures compatibility.
+# If needed on Python 3.12/3.13, you can constrain numba as:
+# numba>=0.60,<0.62
+
+# PyTorch required by openai-whisper
+torch>=2.2.0

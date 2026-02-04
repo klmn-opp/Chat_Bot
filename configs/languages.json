@@ -1,0 +1,4 @@
+{
+    "zh": {"whisper": "zh", "tts": "zh-CN-XiaoxiaoNeural"},
+    "en": {"whisper": "en", "tts": "en-US-AriaNeural"}
+} 
