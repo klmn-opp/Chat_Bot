@@ -19,7 +19,7 @@ class MedicalRobotStreamUI:
         self.root.configure(bg='#f8f9fa')
         
         # 设备设置
-        self.input_device_index = None
+        self.input_device_index = 2
         self.output_device_index = None
         
         # 核心组件初始化
@@ -34,7 +34,7 @@ class MedicalRobotStreamUI:
         
         # 当前状态 - 强制初始化为idle
         self.current_state = "idle"
-        self.current_language = "粤语"
+        self.current_language = "普通话"  # 默认语言
         
         # 创建界面
         self.create_widgets()
@@ -54,12 +54,13 @@ class MedicalRobotStreamUI:
         print("🎉 流式UI初始化完成")
     
     def setup_callbacks(self):
-        """设置流式控制器的回调"""
-        self.stream_controller.set_state_change_callback(self.on_state_change)
+        """设置流式控制器的回调（UI只订阅，不修改）"""
+        self.stream_controller.set_state_change_callback(self._on_controller_state_change)
         self.stream_controller.set_transcription_callback(self.on_realtime_transcription)
         self.stream_controller.set_final_result_callback(self.on_final_result)
         self.stream_controller.set_ai_response_callback(self.on_ai_response)
         self.stream_controller.set_error_callback(self.on_error)
+
     
     def create_widgets(self):
         """创建现代化UI界面"""
@@ -247,28 +248,22 @@ class MedicalRobotStreamUI:
         copyright_label.pack(side=tk.RIGHT, padx=5, pady=2)
     
     def toggle_conversation(self):
-        """切换对话状态"""
-        print(f"🔍 当前状态: UI={self.current_state}, Controller={self.stream_controller.conversation_state}")
+        """切换对话状态（仅发送指令，不预判状态）"""
+        print(f"🔘 按钮被点击，当前UI显示状态: {self.current_state}")
         
-        if self.current_state == "idle":
-            print("✅ 状态检查通过，开始对话")
-            self.start_conversation()
-        elif self.current_state == "listening":
-            print("✅ 状态检查通过，停止对话") 
-            self.stop_conversation()
+        # ✅ 核心修改：不再根据 UI 状态判断，直接把指令发给 Controller
+        # 由 Controller 内部决定当前状态下是否能执行 start/stop
+        if self.current_state == "idle" or self.current_state == "listening":
+            # 简单的切换逻辑：如果是 idle 就 start，如果是 listening 就 stop
+            # 但最终决定权在 Controller
+            if self.current_state == "idle":
+                print("▶️  UI发送“开始”指令")
+                self.stream_controller.start_conversation()
+            else:
+                print("⏹️  UI发送“停止”指令")
+                self.stream_controller.stop_conversation()
         else:
-            # 其他状态下提示等待
-            print(f"⚠️ 状态不符合要求: {self.current_state}")
-            
-            # 尝试自动修复状态不一致问题
-            controller_state = self.stream_controller.get_current_state()
-            if controller_state == "idle" and self.current_state != "idle":
-                print("🔧 检测到状态不一致，尝试修复")
-                self.current_state = "idle"
-                self.update_ui_state("idle")
-                return
-            
-            messagebox.showinfo("提示", f"请等待当前操作完成 (当前状态: {self.current_state})")
+            messagebox.showinfo("提示", f"系统繁忙中，请稍候... (状态: {self.current_state})")
     
     def start_conversation(self):
         """开始对话"""
@@ -314,7 +309,7 @@ class MedicalRobotStreamUI:
         """显示设备设置对话框"""
         dialog = tk.Toplevel(self.root)
         dialog.title("音频设备设置")
-        dialog.geometry("600x500")
+        dialog.geometry("1600x1400")
         dialog.transient(self.root)
         dialog.grab_set()
         
@@ -382,8 +377,9 @@ class MedicalRobotStreamUI:
             input_idx = None if input_choice == "default" else int(input_choice)
             output_idx = None if output_choice == "default" else int(output_choice)
             
-            self.stream_controller.set_devices(input_idx, output_idx)
-            self.input_device_index = input_idx
+            self.stream_controller.set_devices(2, output_idx)
+            print("在总ui.py中[385]强制使用2作为input_device")
+            self.input_device_index = 2
             self.output_device_index = output_idx
             
             self.realtime_display.add_system_message("音频设备设置已更新")
@@ -426,6 +422,18 @@ class MedicalRobotStreamUI:
         # 处理来自ConversationManager的UI更新事件
         pass
     
+    def _on_controller_state_change(self, new_state, data):
+        """
+        【唯一合法的状态更新入口】
+        只有 Controller 能调用这个方法来改变 UI 显示
+        UI 绝不主动调用这个方法
+        """
+        print(f"📥 [Controller→UI] 状态更新: {data.get('old_state', '?')} → {new_state}")
+        
+        # ✅ 只更新 UI 自己的显示变量，不动 Controller 的任何东西
+        self.current_state = new_state
+        self.update_ui_state(new_state)
+
     def update_ui_state(self, state):
         """更新UI状态显示"""
         state_config = {
@@ -475,27 +483,20 @@ class MedicalRobotStreamUI:
             self.language_button.configure(state="normal")
     
     def process_ui_updates(self):
-        """UI更新循环"""
-        # 定期检查状态同步
-        controller_state = self.stream_controller.get_current_state()
-        if controller_state != self.current_state:
-            print(f"🔧 检测到状态不同步: UI={self.current_state}, Controller={controller_state}")
-            # 以Controller状态为准
-            self.current_state = controller_state
-            self.update_ui_state(controller_state)
+        """UI更新循环（仅做健康检查，绝不修改状态）"""
+        try:
+            # ✅ 移除所有 "检测到状态不同步" 后强制覆盖的代码
+            # ✅ 只做一些纯 UI 的、只读的更新（比如滚动条、时间显示等）
+            pass
+        except Exception as e:
+            print(f"⚠️ UI循环异常: {e}")
         
-        # 定期检查和更新UI状态
-        self.root.after(100, self.process_ui_updates)
+        # 继续循环
+        self.root.after(200, self.process_ui_updates)
     
     def force_reset_state(self):
-        """强制重置状态到idle，确保UI和Controller同步"""
-        # 重置Controller状态
-        self.stream_controller.conversation_state = "idle"
-        
-        # 重置UI状态
+        """强制重置（仅重置 UI 显示，不碰 Controller）"""
+        print("🔄 [UI] 仅重置 UI 显示状态为 idle")
         self.current_state = "idle"
-        
-        # 更新UI显示
         self.update_ui_state("idle")
-        
-        print(f"🔄 强制重置状态: Controller={self.stream_controller.conversation_state}, UI={self.current_state}") 
+        # ❌ 绝对禁止：self.stream_controller.conversation_state = "idle"
