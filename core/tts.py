@@ -209,7 +209,6 @@ class TextToSpeech:
         # 启动后台线程执行TTS
         threading.Thread(target=_tts_worker, daemon=True, name="TTSWorker").start()
 
-
     def _convert_mp3_to_wav(self, mp3_file, wav_file):
         """将MP3文件转换为标准WAV格式"""
         try:
@@ -224,16 +223,9 @@ class TextToSpeech:
             # 使用pydub进行音频格式转换
             try:
                 from pydub import AudioSegment
-                
-                # 读取MP3文件
                 audio = AudioSegment.from_mp3(mp3_file)
-                
-                # 导出为标准WAV格式（16位，单声道或立体声，44.1kHz）
                 audio.export(wav_file, format="wav")
-                
-                print("✅ 音频格式转换成功")
                 return True
-                
             except ImportError:
                 print("⚠️ pydub未安装，尝试使用ffmpeg...")
                 # 如果pydub不可用，尝试使用ffmpeg
@@ -258,7 +250,6 @@ class TextToSpeech:
         """回退播放方法"""
         def _system_play():
             try:
-                # 根据系统选择播放命令
                 import platform
                 system = platform.system()
                 
@@ -277,7 +268,6 @@ class TextToSpeech:
                 try:
                     if output_file_path.exists():
                         output_file_path.unlink()
-                        print("🗑️ 系统播放完成，文件已清理")
                 except Exception as e:
                     print(f"⚠️ 清理文件失败: {e}")
                 

@@ -19,7 +19,7 @@ class MedicalRobotStreamUI:
         self.root.configure(bg='#f8f9fa')
         
         # 设备设置
-        self.input_device_index = 2
+        self.input_device_index = None
         self.output_device_index = None
         
         # 核心组件初始化
@@ -34,7 +34,7 @@ class MedicalRobotStreamUI:
         
         # 当前状态 - 强制初始化为idle
         self.current_state = "idle"
-        self.current_language = "普通话"  # 默认语言
+        self.current_language = "粤语"
         
         # 创建界面
         self.create_widgets()
@@ -54,13 +54,12 @@ class MedicalRobotStreamUI:
         print("🎉 流式UI初始化完成")
     
     def setup_callbacks(self):
-        """设置流式控制器的回调（UI只订阅，不修改）"""
-        self.stream_controller.set_state_change_callback(self._on_controller_state_change)
+        """设置流式控制器的回调"""
+        self.stream_controller.set_state_change_callback(self.on_state_change)
         self.stream_controller.set_transcription_callback(self.on_realtime_transcription)
         self.stream_controller.set_final_result_callback(self.on_final_result)
         self.stream_controller.set_ai_response_callback(self.on_ai_response)
         self.stream_controller.set_error_callback(self.on_error)
-
     
     def create_widgets(self):
         """创建现代化UI界面"""
@@ -89,7 +88,7 @@ class MedicalRobotStreamUI:
         header_frame.pack(fill=tk.X, pady=(0, 20))
         
         # 主标题
-        title_font = tkfont.Font(family="Microsoft YaHei", size=28, weight="bold")
+        title_font = tkfont.Font(family="TkDefaultFont", size=28, weight="bold")
         title_label = ttk.Label(
             header_frame,
             text="🤖 智护夜巡",
@@ -99,7 +98,7 @@ class MedicalRobotStreamUI:
         title_label.pack(side=tk.LEFT)
         
         # 副标题
-        subtitle_font = tkfont.Font(family="Microsoft YaHei", size=12)
+        subtitle_font = tkfont.Font(family="TkDefaultFont", size=12)
         subtitle_label = ttk.Label(
             header_frame,
             text="实时语音对话系统",
@@ -112,7 +111,7 @@ class MedicalRobotStreamUI:
         version_label = ttk.Label(
             header_frame,
             text="Stream v2.0",
-            font=("Microsoft YaHei", 10),
+            font=("TkDefaultFont", 10),
             foreground="#95a5a6"
         )
         version_label.pack(side=tk.RIGHT)
@@ -133,7 +132,7 @@ class MedicalRobotStreamUI:
         self.status_text = ttk.Label(
             status_frame,
             text="🎤 点击开始对话",
-            font=("Microsoft YaHei", 12, "bold"),
+            font=("TkDefaultFont", 12, "bold"),
             foreground="#34C759"
         )
         self.status_text.pack(side=tk.LEFT)
@@ -142,7 +141,7 @@ class MedicalRobotStreamUI:
         self.language_indicator = ttk.Label(
             status_frame,
             text=f"语言: {self.current_language}",
-            font=("Microsoft YaHei", 10),
+            font=("TkDefaultFont", 10),
             foreground="#7f8c8d"
         )
         self.language_indicator.pack(side=tk.RIGHT)
@@ -157,8 +156,10 @@ class MedicalRobotStreamUI:
             chat_frame,
             wrap=tk.WORD,
             width=100,
-            height=30,
-            font=("Microsoft YaHei", 12),
+            # 在部分 Windows 设备上，过大的初始高度会把底部按钮挤出可视区域
+            # 调整为更保守的高度，配合 pack(fill=BOTH, expand=True) 自适应伸缩
+            height=15,
+            font=("TkDefaultFont", 12),
             bg="#ffffff",
             fg="#2c3e50",
             padx=15,
@@ -173,58 +174,66 @@ class MedicalRobotStreamUI:
         self.chat_display.insert(tk.END, welcome_msg, "system")
     
     def create_control_panel(self, parent):
-        """创建控制按钮面板（修复布局，确保按钮显示）"""
+        """创建控制按钮面板"""
         control_frame = ttk.Frame(parent)
-    # 关键修改：用pack(fill=tk.X, pady=20)，确保面板显示在对话区域下方
-        control_frame.pack(fill=tk.X, pady=20)
-    
-    # 直接显示按钮，去掉多余的居中容器（先让按钮显示）
+        # 不使用 expand，避免在小窗口时被上方聊天区域挤压而不可见
+        control_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # 按钮容器 - 居中显示
+        button_container = ttk.Frame(control_frame)
+        # 居中放置即可，不占用额外可伸展空间
+        button_container.pack()
+        
+        # 配置按钮样式
         style = ttk.Style()
         style.configure(
-	"Action.TButton",
-    	padding=(20, 10),
-	font=("Microsoft YaHei", 14, "bold")
-    )
-    
-    # 主要对话按钮（必显示）
-        self.conversation_button = ttk.Button(
-	    control_frame,
-    	    text="🎤 开始对话",
-    	    command=self.toggle_conversation,
-	    style="Action.TButton",
-    	    width=20
+            "Action.TButton",
+            padding=(20, 10),
+            font=("TkDefaultFont", 14, "bold")
         )
-    # 直接pack，不嵌套容器，确保显示
-        self.conversation_button.pack(pady=10)
-    
-    # 第二排按钮（可选，先简化）
+        
+        # 主要对话按钮
+        self.conversation_button = ttk.Button(
+            button_container,
+            text="🎤 开始对话",
+            command=self.toggle_conversation,
+            style="Action.TButton",
+            width=20
+        )
+        self.conversation_button.pack(side=tk.LEFT, padx=10)
+        
+        # 第二排按钮
         second_row = ttk.Frame(control_frame)
-        second_row.pack(fill=tk.X, pady=5)
-    
+        # 占满一行以保证按钮始终可见
+        second_row.pack(fill=tk.X, pady=(10, 0))
+        
+        # 语言切换按钮
         self.language_button = ttk.Button(
-	    second_row,
-	    text=f"语言: {self.current_language}",
-       	    command=self.toggle_language,
-	    width=15
+            second_row,
+            text=f"语言: {self.current_language}",
+            command=self.toggle_language,
+            width=15
         )
         self.language_button.pack(side=tk.LEFT, padx=5)
-    
+        
+        # 设备设置按钮
         self.device_button = ttk.Button(
-	    second_row,
-	    text="🔧 设备设置",
-	    command=self.show_device_dialog,
-	    width=15
+            second_row,
+            text="🔧 设备设置",
+            command=self.show_device_dialog,
+            width=15
         )
         self.device_button.pack(side=tk.LEFT, padx=5)
-    
+        
+        # 清除对话按钮
         self.clear_button = ttk.Button(
-	    second_row,
-	    text="🗑️ 清除对话",
-	    command=self.clear_conversation,
-	    width=15
+            second_row,
+            text="🗑️ 清除对话",
+            command=self.clear_conversation,
+            width=15
         )
         self.clear_button.pack(side=tk.LEFT, padx=5)
-        
+    
     def create_status_bar(self, parent):
         """创建底部状态栏"""
         status_bar = ttk.Frame(parent, relief=tk.SUNKEN)
@@ -233,7 +242,7 @@ class MedicalRobotStreamUI:
         self.bottom_status = ttk.Label(
             status_bar,
             text="就绪 | Docker状态: 连接中...",
-            font=("Microsoft YaHei", 9),
+            font=("TkDefaultFont", 9),
             foreground="#7f8c8d"
         )
         self.bottom_status.pack(side=tk.LEFT, padx=5, pady=2)
@@ -242,28 +251,34 @@ class MedicalRobotStreamUI:
         copyright_label = ttk.Label(
             status_bar,
             text="© 2024 智护夜巡团队",
-            font=("Microsoft YaHei", 8),
+            font=("TkDefaultFont", 8),
             foreground="#bdc3c7"
         )
         copyright_label.pack(side=tk.RIGHT, padx=5, pady=2)
     
     def toggle_conversation(self):
-        """切换对话状态（仅发送指令，不预判状态）"""
-        print(f"🔘 按钮被点击，当前UI显示状态: {self.current_state}")
+        """切换对话状态"""
+        print(f"🔍 当前状态: UI={self.current_state}, Controller={self.stream_controller.conversation_state}")
         
-        # ✅ 核心修改：不再根据 UI 状态判断，直接把指令发给 Controller
-        # 由 Controller 内部决定当前状态下是否能执行 start/stop
-        if self.current_state == "idle" or self.current_state == "listening":
-            # 简单的切换逻辑：如果是 idle 就 start，如果是 listening 就 stop
-            # 但最终决定权在 Controller
-            if self.current_state == "idle":
-                print("▶️  UI发送“开始”指令")
-                self.stream_controller.start_conversation()
-            else:
-                print("⏹️  UI发送“停止”指令")
-                self.stream_controller.stop_conversation()
+        if self.current_state == "idle":
+            print("✅ 状态检查通过，开始对话")
+            self.start_conversation()
+        elif self.current_state == "listening":
+            print("✅ 状态检查通过，停止对话") 
+            self.stop_conversation()
         else:
-            messagebox.showinfo("提示", f"系统繁忙中，请稍候... (状态: {self.current_state})")
+            # 其他状态下提示等待
+            print(f"⚠️ 状态不符合要求: {self.current_state}")
+            
+            # 尝试自动修复状态不一致问题
+            controller_state = self.stream_controller.get_current_state()
+            if controller_state == "idle" and self.current_state != "idle":
+                print("🔧 检测到状态不一致，尝试修复")
+                self.current_state = "idle"
+                self.update_ui_state("idle")
+                return
+            
+            messagebox.showinfo("提示", f"请等待当前操作完成 (当前状态: {self.current_state})")
     
     def start_conversation(self):
         """开始对话"""
@@ -309,7 +324,7 @@ class MedicalRobotStreamUI:
         """显示设备设置对话框"""
         dialog = tk.Toplevel(self.root)
         dialog.title("音频设备设置")
-        dialog.geometry("1600x1400")
+        dialog.geometry("600x500")
         dialog.transient(self.root)
         dialog.grab_set()
         
@@ -377,9 +392,8 @@ class MedicalRobotStreamUI:
             input_idx = None if input_choice == "default" else int(input_choice)
             output_idx = None if output_choice == "default" else int(output_choice)
             
-            self.stream_controller.set_devices(2, output_idx)
-            print("在总ui.py中[385]强制使用2作为input_device")
-            self.input_device_index = 2
+            self.stream_controller.set_devices(input_idx, output_idx)
+            self.input_device_index = input_idx
             self.output_device_index = output_idx
             
             self.realtime_display.add_system_message("音频设备设置已更新")
@@ -422,18 +436,6 @@ class MedicalRobotStreamUI:
         # 处理来自ConversationManager的UI更新事件
         pass
     
-    def _on_controller_state_change(self, new_state, data):
-        """
-        【唯一合法的状态更新入口】
-        只有 Controller 能调用这个方法来改变 UI 显示
-        UI 绝不主动调用这个方法
-        """
-        print(f"📥 [Controller→UI] 状态更新: {data.get('old_state', '?')} → {new_state}")
-        
-        # ✅ 只更新 UI 自己的显示变量，不动 Controller 的任何东西
-        self.current_state = new_state
-        self.update_ui_state(new_state)
-
     def update_ui_state(self, state):
         """更新UI状态显示"""
         state_config = {
@@ -483,20 +485,27 @@ class MedicalRobotStreamUI:
             self.language_button.configure(state="normal")
     
     def process_ui_updates(self):
-        """UI更新循环（仅做健康检查，绝不修改状态）"""
-        try:
-            # ✅ 移除所有 "检测到状态不同步" 后强制覆盖的代码
-            # ✅ 只做一些纯 UI 的、只读的更新（比如滚动条、时间显示等）
-            pass
-        except Exception as e:
-            print(f"⚠️ UI循环异常: {e}")
+        """UI更新循环"""
+        # 定期检查状态同步
+        controller_state = self.stream_controller.get_current_state()
+        if controller_state != self.current_state:
+            print(f"🔧 检测到状态不同步: UI={self.current_state}, Controller={controller_state}")
+            # 以Controller状态为准
+            self.current_state = controller_state
+            self.update_ui_state(controller_state)
         
-        # 继续循环
-        self.root.after(200, self.process_ui_updates)
+        # 定期检查和更新UI状态
+        self.root.after(100, self.process_ui_updates)
     
     def force_reset_state(self):
-        """强制重置（仅重置 UI 显示，不碰 Controller）"""
-        print("🔄 [UI] 仅重置 UI 显示状态为 idle")
+        """强制重置状态到idle，确保UI和Controller同步"""
+        # 重置Controller状态
+        self.stream_controller.conversation_state = "idle"
+        
+        # 重置UI状态
         self.current_state = "idle"
+        
+        # 更新UI显示
         self.update_ui_state("idle")
-        # ❌ 绝对禁止：self.stream_controller.conversation_state = "idle"
+        
+        print(f"🔄 强制重置状态: Controller={self.stream_controller.conversation_state}, UI={self.current_state}") 

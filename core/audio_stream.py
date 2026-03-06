@@ -339,12 +339,10 @@ class AudioStreamProcessor:
                     # 🔇 移除 last_voice_time 的重置
                     
                     final_audio = self._strict_crop_audio_to_voice(audio_copy)
-
                     if not final_audio:
                         print("[audio_stream]无有效人声，跳过本次转录，继续监听...")
                         # 直接进入下一轮循环，不执行 _full_transcribe
                         continue
-
                     final_text = ""
                     self.complete_text = ""
 
@@ -796,4 +794,8 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n\n⚠️  检测到手动中断，停止录音...")
         processor.stop_streaming()
+<<<<<<< HEAD
         print("👋 程序退出")
+=======
+        print("👋 程序退出")
+>>>>>>> 787a0c2 (参数实机适配，tts修复，key记录彻底抹除)
