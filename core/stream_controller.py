@@ -23,7 +23,7 @@ class StreamController:
     def __init__(self, 
                  server_host="localhost",
                  server_port=9090,
-                 input_device_index=2,
+                 input_device_index=None,
                  output_device_index=None):
 
         self.input_device_index = input_device_index
@@ -250,13 +250,27 @@ class StreamController:
                 self.on_state_change("language_changed", {"language": language})
 
     def set_devices(self, input_device_index: Optional[int], output_device_index: Optional[int]):
-        if input_device_index is not None:
-            self.input_device_index = input_device_index
-            if self.audio_stream is not None:
-                self.audio_stream.set_input_device(input_device_index)
-        if output_device_index is not None:
-            self.output_device_index = output_device_index
+        # `None` means using system default device.
+        self.input_device_index = input_device_index
+        self.output_device_index = output_device_index
+
+        if self.audio_stream is not None and input_device_index is not None:
+            self.audio_stream.set_input_device(input_device_index)
+
+        if output_device_index is None:
+            self.audio_player.output_device_index = None
+        else:
             self.audio_player.set_output_device(output_device_index)
+
+        # Live bridge is created with fixed device indices; restart if running so changes take effect.
+        if self.use_live_s2s and self.gemini_live_bridge is not None:
+            was_started = getattr(self.gemini_live_bridge, "_started", False)
+            if was_started:
+                self.gemini_live_bridge.stop()
+            self.gemini_live_bridge.input_device_index = self.input_device_index
+            self.gemini_live_bridge.output_device_index = self.output_device_index
+            if was_started:
+                self.gemini_live_bridge.start()
 
     def start_conversation(self):
         """修改：彻底移除idle状态判断，点击开始直接启动持续录音"""

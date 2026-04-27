@@ -48,6 +48,28 @@ class ChatBot:
                     "Content-Type": "application/json"
                 }
 
+                data = {
+              
+                    "model": "Qwen/Qwen2.5-7B-Instruct",
+                    "messages": [
+                        {"role": "system", "content": system_prompt_inner},
+                        {"role": "user", "content": text}
+                    ],
+                    "stream": False,
+                    "max_tokens": 256,
+                    
+                    "thinking_budget": 4096,
+                    "min_p": 0.05,
+                    "stop": None,
+                    "temperature": 0.7,
+                    "top_p": 0.7,
+                    "top_k": 50,
+                    "frequency_penalty": 0.5,
+                    "n": 1,
+                    "response_format": {"type": "text"}
+                }
+
+
                 # ========== 核心修改：适配新平台的请求参数 ==========
                 # data = {
                 #     # 新平台支持的模型，示例用gpt-5.2，也可以换成gpt-5.1
@@ -71,26 +93,6 @@ class ChatBot:
                 #"model": "deepseek-ai/DeepSeek-V3.2-Exp",
                 #"enable_thinking": False,
 
-                data = {
-              
-                    "model": "Qwen/Qwen2.5-7B-Instruct",
-                    "messages": [
-                        {"role": "system", "content": system_prompt_inner},
-                        {"role": "user", "content": text}
-                    ],
-                    "stream": False,
-                    "max_tokens": 256,
-                    
-                    "thinking_budget": 4096,
-                    "min_p": 0.05,
-                    "stop": None,
-                    "temperature": 0.7,
-                    "top_p": 0.7,
-                    "top_k": 50,
-                    "frequency_penalty": 0.5,
-                    "n": 1,
-                    "response_format": {"type": "text"}
-                }
                 # ======================================================
 
                 print(f"\n[Chat]start requiring..\nmax_tokens: {data['max_tokens']}, temperature: {data['temperature']}, top_p: {data['top_p']}, top_k: {data['top_k']}, frequency_penalty: {data['frequency_penalty']}\n", flush=True)
