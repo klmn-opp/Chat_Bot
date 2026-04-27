@@ -39,6 +39,7 @@ class GeminiLiveS2SBridge:
 
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._main_task: Optional[asyncio.Task] = None
         self._stop_event = threading.Event()
         self._started = False
 
@@ -67,19 +68,149 @@ class GeminiLiveS2SBridge:
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(lambda: None)
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=20.0)
         self._started = False
+
+    @staticmethod
+    def _is_input_device_valid(pya: pyaudio.PyAudio, device_index: Optional[int]) -> bool:
+        if device_index is None:
+            return False
+        try:
+            info = pya.get_device_info_by_index(device_index)
+            return int(info.get("maxInputChannels", 0)) > 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_output_device_valid(pya: pyaudio.PyAudio, device_index: Optional[int]) -> bool:
+        if device_index is None:
+            return True
+        try:
+            info = pya.get_device_info_by_index(device_index)
+            return int(info.get("maxOutputChannels", 0)) > 0
+        except Exception:
+            return False
+
+    def _resolve_input_device(self, pya: pyaudio.PyAudio) -> Optional[int]:
+        if self._is_input_device_valid(pya, self.input_device_index):
+            return self.input_device_index
+
+        try:
+            default_info = pya.get_default_input_device_info()
+            default_index = int(default_info.get("index"))
+            if self._is_input_device_valid(pya, default_index):
+                return default_index
+        except Exception:
+            pass
+
+        for idx in range(pya.get_device_count()):
+            if self._is_input_device_valid(pya, idx):
+                return idx
+        return None
+
+    def _resolve_output_device(self, pya: pyaudio.PyAudio) -> Optional[int]:
+        if self._is_output_device_valid(pya, self.output_device_index):
+            return self.output_device_index
+
+        # `None` means use system default output device.
+        return None
+
+    @staticmethod
+    def _supports_input_format(
+        pya: pyaudio.PyAudio,
+        device_index: Optional[int],
+        channels: int,
+        sample_rate: int,
+    ) -> bool:
+        try:
+            kwargs = {
+                "rate": sample_rate,
+                "input_channels": channels,
+                "input_format": pyaudio.paInt16,
+            }
+            if device_index is not None:
+                kwargs["input_device"] = device_index
+            pya.is_format_supported(**kwargs)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _supports_output_format(
+        pya: pyaudio.PyAudio,
+        device_index: Optional[int],
+        channels: int,
+        sample_rate: int,
+    ) -> bool:
+        try:
+            kwargs = {
+                "rate": sample_rate,
+                "output_channels": channels,
+                "output_format": pyaudio.paInt16,
+            }
+            if device_index is not None:
+                kwargs["output_device"] = device_index
+            pya.is_format_supported(**kwargs)
+            return True
+        except Exception:
+            return False
+
+    def _pick_input_format(self, pya: pyaudio.PyAudio, device_index: int) -> tuple[int, int]:
+        # Prioritize the API target (16k mono), then common hardware rates.
+        candidate_rates = [16000, 48000, 44100, 32000, 24000, 22050, 8000]
+        try:
+            device_info = pya.get_device_info_by_index(device_index)
+            default_rate = int(device_info.get("defaultSampleRate", 0))
+            max_channels = int(device_info.get("maxInputChannels", 1))
+        except Exception:
+            default_rate = 0
+            max_channels = 1
+
+        if default_rate > 0 and default_rate not in candidate_rates:
+            candidate_rates.insert(1, default_rate)
+
+        candidate_channels = [1]
+        if max_channels >= 2:
+            candidate_channels.append(2)
+
+        for channels in candidate_channels:
+            for rate in candidate_rates:
+                if self._supports_input_format(pya, device_index, channels, rate):
+                    return rate, channels
+
+        raise RuntimeError(f"设备{device_index}没有可用的16-bit输入采样率/声道组合")
+
+    def _pick_output_format(self, pya: pyaudio.PyAudio, device_index: Optional[int]) -> tuple[int, int]:
+        candidate_rates = [24000, 48000, 44100, 32000, 22050, 16000]
+        channels = 1
+        for rate in candidate_rates:
+            if self._supports_output_format(pya, device_index, channels, rate):
+                return rate, channels
+        # Keep previous fallback behavior if capability probing is inconclusive.
+        return 48000, 1
 
     def _run_in_thread(self) -> None:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
-            self._loop.run_until_complete(self._run_session())
+            self._main_task = self._loop.create_task(self._run_session())
+            self._loop.run_until_complete(self._main_task)
+        except asyncio.CancelledError:
+            pass
         except Exception as exc:
             if self.on_error:
                 self.on_error(f"Gemini Live会话失败: {exc}")
         finally:
+            self._main_task = None
             if self._loop and not self._loop.is_closed():
+                pending = [task for task in asyncio.all_tasks(self._loop) if not task.done()]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    try:
+                        self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    except Exception:
+                        pass
                 self._loop.close()
 
     async def _run_session(self) -> None:
@@ -100,57 +231,39 @@ class GeminiLiveS2SBridge:
         )
 
         try:
-            try:
-                input_stream = await asyncio.to_thread(
-                    pya.open,
-                    format=pyaudio.paInt16,
-                    channels=self._channels,
-                    rate=self._in_sample_rate,
-                    input=True,
-                    input_device_index=self.input_device_index,
-                    frames_per_buffer=self._chunk,
-                )
-                self._source_rate = self._in_sample_rate
-                self._source_channels = self._channels
-            except Exception:
-                # Fallback: some devices do not accept 16k directly.
-                device_info = (
-                    pya.get_device_info_by_index(self.input_device_index)
-                    if self.input_device_index is not None
-                    else pya.get_default_input_device_info()
-                )
-                self._source_rate = int(device_info.get("defaultSampleRate", 48000))
-                max_channels = int(device_info.get("maxInputChannels", 1))
-                self._source_channels = 2 if max_channels >= 2 else 1
+            resolved_input_index = self._resolve_input_device(pya)
+            if resolved_input_index is None:
+                raise RuntimeError("未找到可用的录音设备")
 
-                input_stream = await asyncio.to_thread(
-                    pya.open,
-                    format=pyaudio.paInt16,
-                    channels=self._source_channels,
-                    rate=self._source_rate,
-                    input=True,
-                    input_device_index=self.input_device_index,
-                    frames_per_buffer=self._chunk,
-                )
+            resolved_output_index = self._resolve_output_device(pya)
 
-            try:
-                output_stream = await asyncio.to_thread(
-                    pya.open,
-                    format=pyaudio.paInt16,
-                    channels=self._channels,
-                    rate=self._out_sample_rate,
-                    output=True,
-                    output_device_index=self.output_device_index,
-                )
-            except Exception:
-                output_stream = await asyncio.to_thread(
-                    pya.open,
-                    format=pyaudio.paInt16,
-                    channels=self._channels,
-                    rate=48000,
-                    output=True,
-                    output_device_index=self.output_device_index,
-                )
+            self._source_rate, self._source_channels = self._pick_input_format(
+                pya,
+                resolved_input_index,
+            )
+            self._out_sample_rate, self._channels = self._pick_output_format(
+                pya,
+                resolved_output_index,
+            )
+
+            input_stream = await asyncio.to_thread(
+                pya.open,
+                format=pyaudio.paInt16,
+                channels=self._source_channels,
+                rate=self._source_rate,
+                input=True,
+                input_device_index=resolved_input_index,
+                frames_per_buffer=self._chunk,
+            )
+
+            output_stream = await asyncio.to_thread(
+                pya.open,
+                format=pyaudio.paInt16,
+                channels=self._channels,
+                rate=self._out_sample_rate,
+                output=True,
+                output_device_index=resolved_output_index,
+            )
 
             async with client.aio.live.connect(model=self.model, config=config) as session:
                 async def send_audio() -> None:
@@ -224,9 +337,17 @@ class GeminiLiveS2SBridge:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
 
+        except asyncio.CancelledError:
+            pass
         except Exception as exc:
             if self.on_error:
-                self.on_error(f"Gemini Live运行错误: {exc}")
+                msg = str(exc)
+                if "opening handshake" in msg:
+                    self.on_error(
+                        "Gemini Live运行错误: 与Gemini Live握手超时，请检查网络、代理/防火墙与GEMINI_API_KEY。"
+                    )
+                else:
+                    self.on_error(f"Gemini Live运行错误: {exc}")
         finally:
             try:
                 if input_stream:
@@ -241,6 +362,10 @@ class GeminiLiveS2SBridge:
             except Exception:
                 pass
             await asyncio.to_thread(pya.terminate)
+            try:
+                await client.aio.aclose()
+            except Exception:
+                pass
 
     def _ensure_mono_16k(self, pcm16: bytes, source_rate: int, source_channels: int) -> bytes:
         """Normalize input audio to mono 16k PCM16 LE."""

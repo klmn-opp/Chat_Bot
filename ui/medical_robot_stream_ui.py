@@ -19,7 +19,7 @@ class MedicalRobotStreamUI:
         self.root.configure(bg='#f8f9fa')
         
         # 设备设置
-        self.input_device_index = 2
+        self.input_device_index = None
         self.output_device_index = None
         
         # 核心组件初始化
@@ -328,7 +328,9 @@ class MedicalRobotStreamUI:
         input_frame = ttk.LabelFrame(main_frame, text=" 录音设备 ", padding="10")
         input_frame.pack(fill=tk.X, pady=(0, 10))
         
-        self.input_var = tk.StringVar(value="default")
+        self.input_var = tk.StringVar(
+            value="default" if self.input_device_index is None else str(self.input_device_index)
+        )
         default_input = ttk.Radiobutton(
             input_frame,
             text="使用系统默认设备",
@@ -349,7 +351,9 @@ class MedicalRobotStreamUI:
         output_frame = ttk.LabelFrame(main_frame, text=" 播放设备 ", padding="10")
         output_frame.pack(fill=tk.X, pady=(0, 15))
         
-        self.output_var = tk.StringVar(value="default")
+        self.output_var = tk.StringVar(
+            value="default" if self.output_device_index is None else str(self.output_device_index)
+        )
         default_output = ttk.Radiobutton(
             output_frame,
             text="使用系统默认设备",
@@ -377,9 +381,8 @@ class MedicalRobotStreamUI:
             input_idx = None if input_choice == "default" else int(input_choice)
             output_idx = None if output_choice == "default" else int(output_choice)
             
-            self.stream_controller.set_devices(2, output_idx)
-            print("在总ui.py中[385]强制使用2作为input_device")
-            self.input_device_index = 2
+            self.stream_controller.set_devices(input_idx, output_idx)
+            self.input_device_index = input_idx
             self.output_device_index = output_idx
             
             self.realtime_display.add_system_message("音频设备设置已更新")

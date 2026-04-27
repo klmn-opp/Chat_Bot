@@ -7,7 +7,10 @@ if not os.environ.get('PY_SSIZE_T_CLEAN'):
 # 兼容Linux下的pyaudio加载
 try:
     if sys.platform == 'linux':
-        sys.setdlopenflags(sys.getdlopenflags() | 0x00000010)  # RTLD_GLOBAL
+        # Use platform-provided RTLD constants; hard-coded 0x10 can be invalid on Linux.
+        rtld_global = getattr(os, 'RTLD_GLOBAL', None)
+        if rtld_global is not None:
+            sys.setdlopenflags(sys.getdlopenflags() | rtld_global)
 except:
     pass
 
