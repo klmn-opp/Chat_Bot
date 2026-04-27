@@ -1,12 +1,12 @@
 # 智护夜巡 · 实时语音对话系统（Stream UI）
 
-一个基于本地 Whisper 语音识别、Edge TTS 合成与可视化对话 UI 的桌面应用原型。支持实时录音、语音转文字、调用大模型回复、语音播报与设备选择。
+一个支持实时语音交互的桌面应用原型。当前默认启用 Gemini Live S2S（语音直连语音）以降低交互延迟，同时保留文本转写用于动作语义分析与控制。
 
 ## 功能特性
 - 实时录音与设备选择：列出输入/输出音频设备，选择并开始/停止录音与播放
-- 本地语音识别（ASR）：集成 OpenAI Whisper（本地推理，无需外网）
-- AI 对话：调用可配置的 Chat API（默认 SiliconFlow 兼容接口）
-- 文字转语音（TTS）：基于 `edge-tts` 将 AI 回复播报为语音
+- 低延迟 S2S：集成 Gemini Live API 实时音频输入/输出
+- 文本转写并行动作控制：获取模型输出文本后交给 `MotionAnalyzer` 生成 embedding，并发送 ROS2 动作指令
+- 兼容旧链路：可切换为本地 Whisper + Chat API + Edge TTS 的传统串行流程
 - 现代化 UI：基于 Tkinter 的流式对话界面，显示实时识别、最终文本与系统状态
 
 ## 目录结构
@@ -60,9 +60,12 @@ python main.py
 
 ## 配置
 - 系统提示词：`configs/system_prompt.txt`（可按需修改）
-- AI Key：默认从环境变量 `DEEPSEEK_API_KEY` 读取。你可以在运行前设置：
-  - macOS/Linux: `export DEEPSEEK_API_KEY=sk-...`
-  - Windows(PowerShell): `$env:DEEPSEEK_API_KEY='sk-...'`
+- Gemini Live（默认链路）环境变量：
+  - `GEMINI_API_KEY`：Gemini API Key（必填）
+  - `GEMINI_LIVE_MODEL`：可选，默认 `gemini-3.1-flash-live-preview`
+  - `USE_GEMINI_LIVE_S2S`：可选，默认 `1`；设为 `0` 可回退到旧链路
+- 旧链路（当 `USE_GEMINI_LIVE_S2S=0` 时）环境变量：
+  - `DEEPSEEK_API_KEY`：原 Chat API Key
 - 若希望从 `.env` 加载变量，可在入口处调用 `python-dotenv` 的 `load_dotenv()`（当前代码未默认调用）。
 
 ## 已知问题与排查
