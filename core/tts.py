@@ -1,11 +1,16 @@
 import os
 import sys
-import queue  # 新增：导入队列模块
+import queue
 # 强制定义PY_SSIZE_T_CLEAN宏，解决pyaudio兼容问题
 if not os.environ.get('PY_SSIZE_T_CLEAN'):
     os.environ['PY_SSIZE_T_CLEAN'] = '1'
 # 兼容Linux下的pyaudio加载
-sys.setdlopenflags(sys.getdlopenflags() | 0x00000010)  # RTLD_GLOBAL
+try:
+    if sys.platform == 'linux':
+        sys.setdlopenflags(sys.getdlopenflags() | 0x00000010)  # RTLD_GLOBAL
+except:
+    pass
+
 import asyncio
 import edge_tts
 import time
@@ -38,11 +43,7 @@ class TextToSpeech:
         self.audio_stream = audio_stream
         
     def before_tts_exec(self):
-        """TTS 执行前的内存保护（新增函数）"""
-        # 1. 强制暂停识别，确保流已关闭
-        #self.pause_recognition()
-        # 2. 等待所有线程进入稳定状态
-        #time.sleep(0.2)
+        """TTS 执行前的内存保护"""
         # 3. 强制垃圾回收，释放未引用的内存
         import gc
         gc.collect()
@@ -58,22 +59,25 @@ class TextToSpeech:
             if not self._tts_queue.empty():
                 print(f"📋 队列中有等待的TTS请求，准备执行下一个任务 (当前活跃任务数: {self._active_tasks})", flush=True)
                 # 取出队列第一个任务
-                next_request = self._tts_queue.get()
-                print(f"▶️ 从队列中取出下一个TTS请求: {next_request['text'][:20]}... (剩余队列长度: {self._tts_queue.qsize()})", flush=True)
-                
-                # 核心修复：不用递归，新开线程执行下一个TTS（避免asyncio事件循环阻塞）
-                def run_next_tts():
-                    self.text_to_speech(
-                        text=next_request["text"],
-                        voice=next_request["voice"],
-                        callback=next_request["callback"]
-                    )
-                # 新开守护线程执行，避免阻塞当前流程
-                print("⏳ 准备执行下一个TTS请求，稍等片刻...", flush=True)
-                time.sleep(0.5)  # 短暂延迟
-                threading.Thread(target=run_next_tts, daemon=True, name="NextTTSWorker").start()
-                
-                print(f"▶️ 已启动新线程执行队列中的下一个TTS请求: {next_request['text'][:20]}... (剩余队列长度: {self._tts_queue.qsize()})", flush=True)
+                try:
+                    next_request = self._tts_queue.get_nowait()
+                    print(f"▶️ 从队列中取出下一个TTS请求: {next_request['text'][:20]}... (剩余队列长度: {self._tts_queue.qsize()})", flush=True)
+                    
+                    # 核心修复：不用递归，新开线程执行下一个TTS（避免asyncio事件循环阻塞）
+                    def run_next_tts():
+                        self.text_to_speech(
+                            text=next_request["text"],
+                            voice=next_request["voice"],
+                            callback=next_request["callback"]
+                        )
+                    # 新开守护线程执行，避免阻塞当前流程
+                    print("⏳ 准备执行下一个TTS请求，稍等片刻...", flush=True)
+                    time.sleep(0.5)  # 短暂延迟
+                    threading.Thread(target=run_next_tts, daemon=True, name="NextTTSWorker").start()
+                    
+                    print(f"▶️ 已启动新线程执行队列中的下一个TTS请求: {next_request['text'][:20]}... (剩余队列长度: {self._tts_queue.qsize()})", flush=True)
+                except queue.Empty:
+                    pass
             else:
                 print(f"🔄 TTS任务完成,请继续输入...", flush=True)
 
@@ -104,6 +108,7 @@ class TextToSpeech:
                 retry_delay = 2.0  # 初始重试延迟（秒）
                 
                 for attempt in range(max_retries):
+                    temp_mp3_file = None
                     try:
                         # 如果是重试，先等待退避时间
                         if attempt > 0:
@@ -114,12 +119,9 @@ class TextToSpeech:
                         tts_start_time = time.time()
                         print(f"[tts] 开始TTS合成 (尝试 {attempt+1}/{max_retries}): {text[:30]}...", flush=True)
                         
-                        # ✅ 优化1：增加超时设置，避免无限等待
                         communicate = edge_tts.Communicate(text, voice)
                         temp_mp3_file = self.temp_dir / f"tts_{unique_id}.mp3"
                         
-                        # ✅ 优化2：增加代理/SSL上下文容错（可选）
-                        # 如果网络环境特殊，可以在这里设置 proxy
                         await communicate.save(str(temp_mp3_file))
                         
                         if not temp_mp3_file.exists():
@@ -128,19 +130,21 @@ class TextToSpeech:
                                 callback(success=False, error="TTS文件生成失败")
                             continue
                         
-                        
-                        
                         output_file = self.temp_dir / f"output_{unique_id}.wav"
                         success = self._convert_mp3_to_wav(str(temp_mp3_file), str(output_file))
+                        
+                        # 清理MP3
+                        try:
+                            if temp_mp3_file.exists():
+                                temp_mp3_file.unlink()
+                        except:
+                            pass
+                            
                         if not success:
-                            temp_mp3_file.unlink()
                             if attempt == max_retries - 1 and callback:
                                 callback(success=False, error="音频格式转换失败")
                             continue
-                        
-                        temp_mp3_file.unlink()
 
-                        #print(f"✅ TTS转换完成，文件: {output_file}", flush=True)
                         tts_end_time = time.time()
                         tts_cost = tts_end_time - tts_start_time
 
@@ -149,23 +153,26 @@ class TextToSpeech:
                         RED = "\033[31m"
                         RESET = "\033[0m"
                         
-                        if tts_cost < 1000:  # 低于1.5秒（1500毫秒）→ 绿色
+                        if tts_cost < 1.0:
                             colored_num = f"{GREEN}{tts_cost * 1000:.2f}{RESET}"
-                        elif 1000 <= tts_cost <= 1500:  # 1.5-2.5秒 → 黄色
+                        elif 1.0 <= tts_cost <= 2.5:
                             colored_num = f"{YELLOW}{tts_cost * 1000:.2f}{RESET}"
-                        else:  # 超过2.5秒 → 红色
+                        else:
                             colored_num = f"{RED}{tts_cost * 1000:.2f}{RESET}"
 
                         print(f"[tts] TTS合成并转换成功，耗时: {colored_num} ms", flush=True)
 
-                        # 播放逻辑保持不变
+                        # 播放逻辑
                         if self.audio_player:
                             def on_play_complete(success, error=None):
                                 try:
                                     print(f"🔍 TTS播放回调触发: success={success}, error={error}")
-                                    if output_file.exists():
-                                        output_file.unlink()
-                                        print(f"🗑️ 已删除临时音频文件: {output_file}")
+                                    try:
+                                        if output_file.exists():
+                                            output_file.unlink()
+                                            print(f"🗑️ 已删除临时音频文件: {output_file}")
+                                    except:
+                                        pass
                                     
                                     if self.audio_stream:
                                         print(f"🔍 准备恢复语音识别: audio_stream={self.audio_stream}")
@@ -191,7 +198,7 @@ class TextToSpeech:
                             import traceback
                             print(f"📜 TTS最终异常栈: {traceback.format_exc()}", flush=True)
                             
-                            # ✅ 优化3：最终失败后的兜底恢复
+                            # 最终失败后的兜底恢复
                             if self.audio_stream:
                                 try:
                                     print("🔊 TTS最终失败，兜底恢复语音识别")
@@ -209,7 +216,6 @@ class TextToSpeech:
         # 启动后台线程执行TTS
         threading.Thread(target=_tts_worker, daemon=True, name="TTSWorker").start()
 
-
     def _convert_mp3_to_wav(self, mp3_file, wav_file):
         """将MP3文件转换为标准WAV格式"""
         try:
@@ -218,25 +224,14 @@ class TextToSpeech:
                 print(f"❌ 输入文件不存在: {mp3_file}")
                 return False
             
-            print(f"🔄 开始音频格式转换: {os.path.basename(mp3_file)} -> {os.path.basename(wav_file)}")
-            
-            
             # 使用pydub进行音频格式转换
             try:
                 from pydub import AudioSegment
-                
-                # 读取MP3文件
                 audio = AudioSegment.from_mp3(mp3_file)
-                
-                # 导出为标准WAV格式（16位，单声道或立体声，44.1kHz）
                 audio.export(wav_file, format="wav")
-                
-                print("✅ 音频格式转换成功")
                 return True
-                
             except ImportError:
                 print("⚠️ pydub未安装，尝试使用ffmpeg...")
-                # 如果pydub不可用，尝试使用ffmpeg
                 tts_start_time = time.time()
                 result = os.system(f"ffmpeg -i '{mp3_file}' -y '{wav_file}' >/dev/null 2>&1")
                 

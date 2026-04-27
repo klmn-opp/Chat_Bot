@@ -1,6 +1,6 @@
 import numpy as np
 import requests
-from deep_translator import GoogleTranslator
+#from deep_translator import GoogleTranslator
 import time
 import os
 # 第一步：粘贴你生成的所有向量（替换下面的示例）

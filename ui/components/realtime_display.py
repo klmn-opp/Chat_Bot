@@ -20,27 +20,27 @@ class RealtimeDisplay:
         # 实时文本样式（灰色、斜体）
         self.text_widget.tag_configure("realtime", 
                                      foreground="#8E8E93", 
-                                     font=("Microsoft YaHei", 12, "italic"))
+                                     font=("TkDefaultFont", 12, "italic"))
         
         # 用户输入样式（蓝色）
         self.text_widget.tag_configure("user", 
                                      foreground="#007AFF", 
-                                     font=("Microsoft YaHei", 12, "bold"))
+                                     font=("TkDefaultFont", 12, "bold"))
         
         # AI响应样式（绿色）
         self.text_widget.tag_configure("ai", 
                                      foreground="#34C759", 
-                                     font=("Microsoft YaHei", 12))
+                                     font=("TkDefaultFont", 12))
         
         # 系统消息样式（灰色）
         self.text_widget.tag_configure("system", 
                                      foreground="#8E8E93", 
-                                     font=("Microsoft YaHei", 10))
+                                     font=("TkDefaultFont", 10))
         
         # 时间戳样式（浅灰色、小字）
         self.text_widget.tag_configure("timestamp", 
                                      foreground="#C7C7CC", 
-                                     font=("Microsoft YaHei", 9))
+                                     font=("TkDefaultFont", 9))
     
     def show_realtime_text(self, text: str):
         """显示实时识别文本（灰色、斜体）"""

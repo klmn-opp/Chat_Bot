@@ -25,7 +25,9 @@ class AudioStreamProcessor:
                  server_host=None,
                  server_port=None,
                  language="zh",
+
                  input_device_index=2,  # ✅ 
+
                  output_device_index=None):
         self.language = language
         self.output_device_index = output_device_index
@@ -40,9 +42,11 @@ class AudioStreamProcessor:
             self._pyaudio_initialized = False
             return
         
+
         # ✅ 第一步：强制使用设备9，关闭自动选择
         #self.input_device_index = input_device_index
         self.input_device_index = 2
+
         print(f"\n🔍 强制使用指定设备: {self.input_device_index}")
         #self.input_device_index = input_device_index  # 固定为2
         # 校验设备9是否存在且支持录音
@@ -69,8 +73,10 @@ class AudioStreamProcessor:
         # 固定参数（仅改采样率/声道数，其他不变）
         self.CHUNK = 1024
         self.FORMAT = pyaudio.paInt16
+
         # 新增：强制使用 PulseAudio 设备（而不是直接访问 hw:9）
         self.input_device_index = 2  # 放弃直接指定设备9的 hw 索引
+
         # 改为通过设备名称匹配 PulseAudio 托管的设备
         #self._set_pulse_device_by_index(2)
         
@@ -112,7 +118,9 @@ class AudioStreamProcessor:
         self.on_error = None
 
         # 静音检测参数
+
         self.SILENCE_THRESHOLD = 0.18
+
         self.SILENCE_DURATION = 2
         self.last_voice_time = time.time()
         self.silent_chunk_count = 0
@@ -233,7 +241,10 @@ class AudioStreamProcessor:
         
         for idx, chunk in enumerate(audio_data):
             energy = self._calculate_audio_energy(chunk)
+
             is_voice = energy > 0.1 #   ✅ 裁剪时用的能量阈值，确保只保留明显的语音块
+
+
             if is_voice:
                 voice_chunks.append(chunk)
         
@@ -332,7 +343,9 @@ class AudioStreamProcessor:
                 # ✅ 触发转录的条件（仅判断块数）
                 if self.silent_chunk_count >= REQUIRED_SILENT_CHUNKS and len(self.audio_data) > 0:
                     print("\r" + " " * 120, end="\r", flush=True)
-                    
+
+                    print(f"\n[audio_stream] 检测到连续静音，语音长度: {len(self.audio_data)}块，触发转录...")
+
                     audio_copy = self.audio_data.copy()
                     self.audio_data = []
                     self.silent_chunk_count = 0
@@ -340,22 +353,24 @@ class AudioStreamProcessor:
                     
                     final_audio = self._strict_crop_audio_to_voice(audio_copy)
 
+                    print(f"[audio_stream] 裁剪后有效语音块数: {len(final_audio)}")
+
                     if not final_audio:
                         print("[audio_stream]无有效人声，跳过本次转录，继续监听...")
                         # 直接进入下一轮循环，不执行 _full_transcribe
                         continue
-
                     final_text = ""
                     self.complete_text = ""
 
                     if final_audio and len(final_audio) > 0:
+                        print(f"\n[audio_stream] 检测到连续静音，开始转录（保留{len(final_audio)}块有效语音）...")
                         final_text = self._full_transcribe(final_audio)
                         if final_text and final_text.strip():
                             self.complete_text = final_text.strip()
 
-                    #print(f"\n[audio_stream] 转录结果: {self.complete_text if self.complete_text else '无有效语音'}")
-                    #print("🎉 检测到连续静音，完成本次转录")
-                    #print(f"📜 本次转录结果: {self.complete_text if self.complete_text else '无有效语音'}")
+                    print(f"\n[audio_stream] 转录结果: {self.complete_text if self.complete_text else '无有效语音'}")
+                    # print("🎉 检测到连续静音，完成本次转录")
+                    # print(f"📜 本次转录结果: {self.complete_text if self.complete_text else '无有效语音'}")
 
                     if self.on_final_transcription:
                         self.on_final_transcription(self.complete_text)
