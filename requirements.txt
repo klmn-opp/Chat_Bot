@@ -14,3 +14,4 @@ pydub>=0.25.1
 # PyTorch required by openai-whisper
 torch>=2.2.0
 google-genai>=1.0.0
+websockets>=12.0
