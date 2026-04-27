@@ -18,3 +18,4 @@ temp.py
 conversation_logs/
 .env
 *.rtf
+*.txt
