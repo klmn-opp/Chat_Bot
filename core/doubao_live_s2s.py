@@ -3,6 +3,7 @@ import audioop
 import json
 import struct
 import threading
+import time
 import uuid
 import zlib
 from typing import Callable, Optional
@@ -52,6 +53,58 @@ class DoubaoLiveS2SBridge:
 	_EV_CHAT_ENDED = 559
 	_EV_DIALOG_COMMON_ERROR = 599
 
+	_EVENT_NAME_MAP = {
+		1: "StartConnection",
+		2: "FinishConnection",
+		50: "ConnectionStarted",
+		51: "ConnectionFailed",
+		52: "ConnectionFinished",
+		100: "StartSession",
+		102: "FinishSession",
+		150: "SessionStarted",
+		152: "SessionFinished",
+		153: "SessionFailed",
+		154: "UsageResponse",
+		200: "TaskRequest",
+		350: "TTSSentenceStart",
+		351: "TTSSentenceEnd",
+		352: "TTSResponse",
+		359: "TTSEnded",
+		450: "ASRInfo",
+		451: "ASRResponse",
+		459: "ASREnded",
+		550: "ChatResponse",
+		559: "ChatEnded",
+		599: "DialogCommonError",
+	}
+	_CONNECT_EVENTS = {_EV_START_CONNECTION, _EV_FINISH_CONNECTION, 50, 51, 52}
+	_SESSION_EVENTS = {
+		_EV_START_SESSION,
+		_EV_FINISH_SESSION,
+		_EV_TASK_REQUEST,
+		150,
+		152,
+		153,
+		154,
+		251,
+		350,
+		351,
+		352,
+		359,
+		450,
+		451,
+		459,
+		550,
+		553,
+		559,
+		567,
+		568,
+		569,
+		570,
+		571,
+		599,
+	}
+
 	_ERROR_HINTS = {
 		45000003: "Abnormal silence audio: long silence caused server-side timeout.",
 		42000020: "Invalid StartSession payload (often asr.extra or tts.extra is null).",
@@ -96,7 +149,9 @@ class DoubaoLiveS2SBridge:
 		self._out_sample_rate = 24000
 		self._channels = 1
 		self._sample_width = 2
-		self._chunk = 1024
+		# 16kHz mono int16 -> 20ms packet = 320 frames = 640 bytes.
+		# Use doc-recommended frame size to improve VAD/ASR responsiveness.
+		self._chunk = 320
 		self._source_rate = 16000
 		self._source_channels = 1
 
@@ -110,17 +165,34 @@ class DoubaoLiveS2SBridge:
 		self._current_user_partial = ""
 		self._current_ai_partial = ""
 
+		# Debug counters
+		self._tx_audio_packets = 0
+		self._rx_audio_packets = 0
+		self._rx_events = 0
+
+	def _debug(self, message: str) -> None:
+		print(f"[DoubaoLiveS2S] {message}", flush=True)
+
+	@classmethod
+	def _event_name(cls, event_id: Optional[int]) -> str:
+		if event_id is None:
+			return "None"
+		return cls._EVENT_NAME_MAP.get(event_id, f"event_{event_id}")
+
 	def start(self) -> bool:
 		if self._started:
+			self._debug("start() ignored because session is already running")
 			return True
 
 		self._stop_event.clear()
+		self._debug("start() called, creating background thread")
 		self._thread = threading.Thread(target=self._run_in_thread, daemon=True, name="DoubaoLiveS2S")
 		self._thread.start()
 		self._started = True
 		return True
 
 	def stop(self) -> None:
+		self._debug("stop() called")
 		self._stop_event.set()
 		if self._loop and self._loop.is_running():
 			self._loop.call_soon_threadsafe(lambda: None)
@@ -244,6 +316,7 @@ class DoubaoLiveS2SBridge:
 
 	def _run_in_thread(self) -> None:
 		try:
+			self._debug("event loop thread started")
 			self._loop = asyncio.new_event_loop()
 			asyncio.set_event_loop(self._loop)
 			self._main_task = self._loop.create_task(self._run_session())
@@ -254,7 +327,9 @@ class DoubaoLiveS2SBridge:
 			if self.on_error:
 				self.on_error(f"Doubao Live session failed: {exc}")
 		finally:
+			self._debug("event loop thread exiting")
 			self._main_task = None
+			self._started = False
 			if self._loop and not self._loop.is_closed():
 				pending = [task for task in asyncio.all_tasks(self._loop) if not task.done()]
 				for task in pending:
@@ -302,13 +377,14 @@ class DoubaoLiveS2SBridge:
 		payload: bytes,
 		include_session_id: bool,
 		include_connect_id: bool,
+		serialization: int = _SER_JSON,
 	) -> bytes:
 		frame = bytearray()
 		frame.extend(
 			self._build_header(
 				self._MSG_FULL_CLIENT,
 				self._FLAG_EVENT,
-				self._SER_JSON,
+				serialization,
 				self._COMP_NONE,
 			)
 		)
@@ -334,6 +410,26 @@ class DoubaoLiveS2SBridge:
 		frame.extend(self._build_header(self._MSG_AUDIO_CLIENT, flags, self._SER_RAW, self._COMP_NONE))
 		seq = -1 if is_last else self._next_seq()
 		frame.extend(self._pack_i32(seq))
+		frame.extend(self._pack_u32(len(audio_payload)))
+		frame.extend(audio_payload)
+		return bytes(frame)
+
+	def _build_task_audio_event(self, audio_payload: bytes) -> bytes:
+		# TaskRequest should be sent as audio request with event flag.
+		# Frame layout: header(audio,event,raw) + event_id + session_id + payload_size + pcm bytes
+		frame = bytearray()
+		frame.extend(
+			self._build_header(
+				self._MSG_AUDIO_CLIENT,
+				self._FLAG_EVENT,
+				self._SER_RAW,
+				self._COMP_NONE,
+			)
+		)
+		frame.extend(self._pack_i32(self._EV_TASK_REQUEST))
+		session_bytes = self._session_id.encode("utf-8")
+		frame.extend(self._pack_u32(len(session_bytes)))
+		frame.extend(session_bytes)
 		frame.extend(self._pack_u32(len(audio_payload)))
 		frame.extend(audio_payload)
 		return bytes(frame)
@@ -375,27 +471,20 @@ class DoubaoLiveS2SBridge:
 
 		if flags == self._FLAG_EVENT:
 			event_id, offset = self._read_i32(data, offset)
-
-			# Optional fields vary by event type. Parse heuristically by trying
-			# session/connect IDs first if buffer shape matches.
-			if len(data) >= offset + 4:
-				candidate_len = struct.unpack(">I", data[offset : offset + 4])[0]
-				# candidate_len is plausible if we still have at least
-				# [candidate bytes] + [payload_size(4)] following.
-				if candidate_len <= len(data) - (offset + 4 + 4):
+			if event_id in self._CONNECT_EVENTS and len(data) >= offset + 4:
+				connect_len = struct.unpack(">I", data[offset : offset + 4])[0]
+				if connect_len <= len(data) - (offset + 4 + 4):
 					offset += 4
-					if candidate_len > 0:
-						session_id = data[offset : offset + candidate_len].decode("utf-8", errors="ignore")
-						offset += candidate_len
-
-					# Some frames can carry both connect_id and session_id.
-					if len(data) >= offset + 4:
-						second_len = struct.unpack(">I", data[offset : offset + 4])[0]
-						if second_len <= len(data) - (offset + 4 + 4):
-							offset += 4
-							if second_len > 0:
-								connect_id = data[offset : offset + second_len].decode("utf-8", errors="ignore")
-								offset += second_len
+					if connect_len > 0:
+						connect_id = data[offset : offset + connect_len].decode("utf-8", errors="ignore")
+						offset += connect_len
+			if event_id in self._SESSION_EVENTS and len(data) >= offset + 4:
+				session_len = struct.unpack(">I", data[offset : offset + 4])[0]
+				if session_len <= len(data) - (offset + 4 + 4):
+					offset += 4
+					if session_len > 0:
+						session_id = data[offset : offset + session_len].decode("utf-8", errors="ignore")
+						offset += session_len
 		elif message_type == self._MSG_ERROR:
 			error_code, offset = self._read_i32(data, offset)
 		elif flags in {self._FLAG_SEQ_POS, self._FLAG_SEQ_NEG_LAST}:
@@ -445,13 +534,22 @@ class DoubaoLiveS2SBridge:
 
 	def _build_start_session(self) -> bytes:
 		body = {
+			"tts": {
+				"audio_config": {
+					"channel": 1,
+					"format": "pcm_s16le",
+					"sample_rate": 24000,
+				}
+			},
 			"dialog": {
 				"system_role": self.system_prompt,
 				"extra": {
 					"model": self.model,
+					"input_mod": "keep_alive",
 				},
 			}
 		}
+		self._debug(f"building StartSession payload with model={self.model}")
 		payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 		return self._build_event_frame(
 			event_id=self._EV_START_SESSION,
@@ -481,6 +579,7 @@ class DoubaoLiveS2SBridge:
 
 		is_interim = bool(first.get("is_interim", False))
 		self._current_user_partial = text
+		self._debug(f"ASR text received: interim={is_interim}, text={text[:120]}")
 
 		if is_interim:
 			if self.on_user_partial:
@@ -495,16 +594,20 @@ class DoubaoLiveS2SBridge:
 		if not text:
 			return
 
-		self._current_ai_partial = text
+		# ChatResponse is streamed by chunks; accumulate instead of overriding.
+		self._current_ai_partial += text
+		self._debug(f"Chat partial received: {text[:120]}")
 		if self.on_ai_partial:
 			self.on_ai_partial(text)
 
 	def _handle_chat_ended(self, payload_json: dict) -> None:
+		self._debug("Chat ended event received")
 		if self._current_ai_partial and self.on_ai_final:
 			self.on_ai_final(self._current_ai_partial)
 		self._current_ai_partial = ""
 
 	def _handle_error_payload(self, payload_json: dict) -> None:
+		self._debug(f"DialogCommonError payload: {payload_json}")
 		if not self.on_error:
 			return
 		status_code = payload_json.get("status_code")
@@ -543,6 +646,7 @@ class DoubaoLiveS2SBridge:
 		return " | ".join(parts)
 
 	async def _recv_loop(self, ws: websockets.WebSocketClientProtocol) -> None:
+		self._debug("recv loop started")
 		while not self._stop_event.is_set():
 			raw = await ws.recv()
 			if not isinstance(raw, (bytes, bytearray)):
@@ -558,10 +662,21 @@ class DoubaoLiveS2SBridge:
 			mt = parsed["message_type"]
 			event_id = parsed["event_id"]
 			payload_json = parsed["payload_json"]
+			if mt == self._MSG_FULL_SERVER:
+				self._rx_events += 1
+				if self._rx_events <= 10 or self._rx_events % 20 == 0:
+					self._debug(
+						f"server event received: id={event_id} ({self._event_name(event_id)}), count={self._rx_events}"
+					)
 
 			if mt == self._MSG_AUDIO_SERVER:
 				audio_bytes = parsed["payload"]
 				if audio_bytes:
+					self._rx_audio_packets += 1
+					if self._rx_audio_packets <= 5 or self._rx_audio_packets % 50 == 0:
+						self._debug(
+							f"audio packet received from server: size={len(audio_bytes)}, count={self._rx_audio_packets}"
+						)
 					try:
 						self._audio_out_queue.put_nowait(audio_bytes)
 					except asyncio.QueueFull:
@@ -577,6 +692,7 @@ class DoubaoLiveS2SBridge:
 				continue
 
 			if mt == self._MSG_ERROR:
+				self._debug("binary error frame received")
 				if self.on_error:
 					self.on_error(self._format_binary_error(parsed))
 				continue
@@ -594,13 +710,25 @@ class DoubaoLiveS2SBridge:
 				self._handle_error_payload(payload_json)
 
 	async def _send_audio_loop(self, ws: websockets.WebSocketClientProtocol, input_stream: pyaudio.Stream) -> None:
+		self._debug("send audio loop started")
 		while not self._stop_event.is_set():
 			pcm = await asyncio.to_thread(input_stream.read, self._chunk, False)
 			normalized = self._ensure_mono_16k(pcm, self._source_rate, self._source_channels)
 			if normalized:
-				await ws.send(self._build_audio_frame(normalized, is_last=False))
+				self._tx_audio_packets += 1
+				if self._tx_audio_packets <= 5 or self._tx_audio_packets % 50 == 0:
+					rms = 0
+					try:
+						rms = audioop.rms(normalized, self._sample_width)
+					except Exception:
+						pass
+					self._debug(
+						f"audio packet sent: size={len(normalized)}, seq={self._seq}, rms={rms}, count={self._tx_audio_packets}"
+					)
+				await ws.send(self._build_task_audio_event(normalized))
 
 	async def _play_audio_loop(self, output_stream: pyaudio.Stream) -> None:
+		self._debug("play audio loop started")
 		while not self._stop_event.is_set():
 			try:
 				pcm = await asyncio.wait_for(self._audio_out_queue.get(), timeout=0.25)
@@ -609,8 +737,15 @@ class DoubaoLiveS2SBridge:
 
 			if self._out_sample_rate != 24000:
 				pcm, _ = audioop.ratecv(pcm, self._sample_width, 1, 24000, self._out_sample_rate, None)
+			if len(pcm) % self._sample_width != 0:
+				# Avoid PortAudio "not a whole number of frames" on odd-byte payloads.
+				pcm = pcm[: len(pcm) - (len(pcm) % self._sample_width)]
+				if not pcm:
+					continue
 
 			await asyncio.to_thread(output_stream.write, pcm)
+			if self._rx_audio_packets <= 5 or self._rx_audio_packets % 50 == 0:
+				self._debug(f"audio packet played: size={len(pcm)}")
 
 	async def _run_session(self) -> None:
 		pya = pyaudio.PyAudio()
@@ -621,6 +756,12 @@ class DoubaoLiveS2SBridge:
 		self._session_id = str(uuid.uuid4())
 		self._connect_id = str(uuid.uuid4())
 		self._seq = 3
+		self._tx_audio_packets = 0
+		self._rx_audio_packets = 0
+		self._rx_events = 0
+		self._debug(
+			f"new session prepared: session_id={self._session_id}, connect_id={self._connect_id}, seq_start={self._seq}"
+		)
 
 		try:
 			resolved_input_index = self._resolve_input_device(pya)
@@ -631,6 +772,12 @@ class DoubaoLiveS2SBridge:
 
 			self._source_rate, self._source_channels = self._pick_input_format(pya, resolved_input_index)
 			self._out_sample_rate, self._channels = self._pick_output_format(pya, resolved_output_index)
+			self._debug(
+				"audio format selected: "
+				f"input_device={resolved_input_index}, source_rate={self._source_rate}, "
+				f"source_channels={self._source_channels}, output_device={resolved_output_index}, "
+				f"output_rate={self._out_sample_rate}, output_channels={self._channels}"
+			)
 
 			input_stream = await asyncio.to_thread(
 				pya.open,
@@ -641,6 +788,7 @@ class DoubaoLiveS2SBridge:
 				input_device_index=resolved_input_index,
 				frames_per_buffer=self._chunk,
 			)
+			self._debug("input stream opened")
 
 			output_stream = await asyncio.to_thread(
 				pya.open,
@@ -651,6 +799,7 @@ class DoubaoLiveS2SBridge:
 				output_device_index=resolved_output_index,
 				frames_per_buffer=self._chunk,
 			)
+			self._debug("output stream opened")
 
 			async with websockets.connect(
 				self.WS_URL,
@@ -660,30 +809,66 @@ class DoubaoLiveS2SBridge:
 				ping_timeout=20,
 				close_timeout=5,
 			) as ws:
+				self._debug("websocket connected")
 				await ws.send(self._build_start_connection())
+				self._debug("StartConnection sent")
 				await ws.send(self._build_start_session())
+				self._debug("StartSession sent")
 
 				recv_task = asyncio.create_task(self._recv_loop(ws))
 				send_task = asyncio.create_task(self._send_audio_loop(ws, input_stream))
 				play_task = asyncio.create_task(self._play_audio_loop(output_stream))
+				self._debug("all loops started (recv/send/play)")
+				last_heartbeat = time.monotonic()
 
 				try:
 					while not self._stop_event.is_set():
-						await asyncio.sleep(0.1)
+						await asyncio.sleep(0.2)
+						now = time.monotonic()
+						if now - last_heartbeat >= 2.0:
+							self._debug(
+								"heartbeat: "
+								f"tx_audio={self._tx_audio_packets}, rx_audio={self._rx_audio_packets}, rx_events={self._rx_events}"
+							)
+							last_heartbeat = now
+
+						for loop_name, task in (
+							("recv", recv_task),
+							("send", send_task),
+							("play", play_task),
+						):
+							if task.done():
+								exc = None
+								try:
+									exc = task.exception()
+								except Exception:
+									exc = None
+								if exc:
+									self._debug(f"{loop_name} loop exited with exception: {exc}")
+									if self.on_error:
+										self.on_error(f"Doubao {loop_name} loop failed: {exc}")
+								else:
+									self._debug(f"{loop_name} loop exited unexpectedly without exception")
+								self._stop_event.set()
+								break
 				finally:
 					send_task.cancel()
 					play_task.cancel()
 					recv_task.cancel()
 					await asyncio.gather(send_task, play_task, recv_task, return_exceptions=True)
+					self._debug("loops cancelled and joined")
 
 					# End current session and close websocket gracefully.
 					try:
 						await ws.send(self._build_finish_session())
+						self._debug("FinishSession sent")
 						await ws.send(self._build_finish_connection())
+						self._debug("FinishConnection sent")
 					except Exception:
 						pass
 
 		except Exception as exc:
+			self._debug(f"run session exception: {exc}")
 			if self.on_error:
 				self.on_error(f"Doubao realtime failed: {exc}")
 		finally:
@@ -710,6 +895,7 @@ class DoubaoLiveS2SBridge:
 				pass
 
 			await asyncio.to_thread(pya.terminate)
+			self._debug("audio resources released and session finished")
 
 	def _ensure_mono_16k(self, pcm16: bytes, source_rate: int, source_channels: int) -> bytes:
 		data = pcm16
