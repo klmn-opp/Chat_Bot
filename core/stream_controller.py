@@ -8,7 +8,7 @@ from core.chat import ChatBot
 from core.tts import TextToSpeech
 from ui.components.audio_player import AudioPlayer
 from core.motion_analyzer import MotionAnalyzer
-from core.gemini_live_s2s import GeminiLiveS2SBridge
+from core.doubao_live_s2s import DoubaoLiveS2SBridge
 
 
 # 注意：这里不再需要 import rclpy，避免版本冲突
@@ -29,9 +29,9 @@ class StreamController:
         self.input_device_index = input_device_index
         self.output_device_index = output_device_index
 
-        # 默认启用 Gemini Live S2S；如需回退旧链路可设置 USE_GEMINI_LIVE_S2S=0
+        # 默认启用实时S2S；如需回退旧链路可设置 USE_GEMINI_LIVE_S2S=0
         self.use_live_s2s = os.getenv("USE_GEMINI_LIVE_S2S", "1") == "1"
-        self.gemini_live_bridge: Optional[GeminiLiveS2SBridge] = None
+        self.live_s2s_bridge: Optional[DoubaoLiveS2SBridge] = None
 
         self.audio_stream = None
         self.chat_bot = None
@@ -89,7 +89,7 @@ class StreamController:
             self._setup_audio_callbacks()
         
         if self.use_live_s2s:
-            print("🎯 流式控制器初始化完成 (Gemini Live S2S + MotionAnalyzer)")
+            print("🎯 流式控制器初始化完成 (Doubao Live S2S + MotionAnalyzer)")
         else:
             print("🎯 流式控制器初始化完成 (ROS控制已切换至命令行模式)")
 
@@ -102,13 +102,15 @@ class StreamController:
         return f"{self.system_prompt}\n\n{language_hint}"
 
     def _create_live_bridge(self):
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("缺少 GEMINI_API_KEY，无法启动 Gemini Live S2S")
+        app_id = os.getenv("DOUBAO_APP_ID")
+        access_key = os.getenv("DOUBAO_ACCESS_KEY")
+        if not app_id or not access_key:
+            raise ValueError("缺少 DOUBAO_APP_ID / DOUBAO_ACCESS_KEY，无法启动 Doubao Live S2S")
 
-        model = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
-        self.gemini_live_bridge = GeminiLiveS2SBridge(
-            api_key=api_key,
+        model = os.getenv("DOUBAO_MODEL", "1.2.1.1")
+        self.live_s2s_bridge = DoubaoLiveS2SBridge(
+            app_id=app_id,
+            access_key=access_key,
             model=model,
             system_prompt=self._build_live_prompt(),
             input_device_index=self.input_device_index,
@@ -263,14 +265,14 @@ class StreamController:
             self.audio_player.set_output_device(output_device_index)
 
         # Live bridge is created with fixed device indices; restart if running so changes take effect.
-        if self.use_live_s2s and self.gemini_live_bridge is not None:
-            was_started = getattr(self.gemini_live_bridge, "_started", False)
+        if self.use_live_s2s and self.live_s2s_bridge is not None:
+            was_started = getattr(self.live_s2s_bridge, "_started", False)
             if was_started:
-                self.gemini_live_bridge.stop()
-            self.gemini_live_bridge.input_device_index = self.input_device_index
-            self.gemini_live_bridge.output_device_index = self.output_device_index
+                self.live_s2s_bridge.stop()
+            self.live_s2s_bridge.input_device_index = self.input_device_index
+            self.live_s2s_bridge.output_device_index = self.output_device_index
             if was_started:
-                self.gemini_live_bridge.start()
+                self.live_s2s_bridge.start()
 
     def start_conversation(self):
         """修改：彻底移除idle状态判断，点击开始直接启动持续录音"""
@@ -284,10 +286,13 @@ class StreamController:
             self.current_user_text = ""
 
             if self.use_live_s2s:
-                if self.gemini_live_bridge is None:
+                if self.live_s2s_bridge is None:
                     self._create_live_bridge()
-                self.gemini_live_bridge.start()
-                print("▶️  已启动 Gemini Live S2S 持续会话")
+                if getattr(self.live_s2s_bridge, "_started", False):
+                    print("ℹ️  Doubao Live S2S 已在运行，忽略重复开始")
+                    return True
+                self.live_s2s_bridge.start()
+                print("▶️  已启动 Doubao Live S2S 持续会话")
                 return True
 
             # 启动音频流（旧链路）
@@ -308,9 +313,9 @@ class StreamController:
         """修改：停止录音，状态仍设为listening（无idle）"""
         try:
             if self.use_live_s2s:
-                if self.gemini_live_bridge is not None:
-                    self.gemini_live_bridge.stop()
-                    self.gemini_live_bridge = None
+                if self.live_s2s_bridge is not None:
+                    self.live_s2s_bridge.stop()
+                    self.live_s2s_bridge = None
             else:
                 self.audio_stream.stop_streaming()
             # 停止后仍保留listening状态，方便下次直接转录
@@ -403,6 +408,7 @@ class StreamController:
 
 
     def _on_audio_error(self, error: str):
+        print(f"❌ 音频链路错误: {error}", flush=True)
         if self.on_error:
             self.on_error(error)
         self._update_state("listening")
