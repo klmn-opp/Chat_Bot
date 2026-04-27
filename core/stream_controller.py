@@ -8,6 +8,7 @@ from core.chat import ChatBot
 from core.tts import TextToSpeech
 from ui.components.audio_player import AudioPlayer
 from core.motion_analyzer import MotionAnalyzer
+from core.gemini_live_s2s import GeminiLiveS2SBridge
 
 
 # 注意：这里不再需要 import rclpy，避免版本冲突
@@ -24,18 +25,30 @@ class StreamController:
                  server_port=9090,
                  input_device_index=2,
                  output_device_index=None):
-        
-        # 初始化核心组件
-        self.audio_stream = AudioStreamProcessor(
-            server_host=server_host,
-            server_port=server_port,
-            language="zh",
-            input_device_index=input_device_index,
-            output_device_index=output_device_index
-        )
-        self.chat_bot = ChatBot()
-        self.tts = TextToSpeech(audio_stream=self.audio_stream, audio_player=None)
+
+        self.input_device_index = input_device_index
+        self.output_device_index = output_device_index
+
+        # 默认启用 Gemini Live S2S；如需回退旧链路可设置 USE_GEMINI_LIVE_S2S=0
+        self.use_live_s2s = os.getenv("USE_GEMINI_LIVE_S2S", "1") == "1"
+        self.gemini_live_bridge: Optional[GeminiLiveS2SBridge] = None
+
+        self.audio_stream = None
+        self.chat_bot = None
+        self.tts = None
         self.audio_player = AudioPlayer(output_device_index=output_device_index)
+
+        if not self.use_live_s2s:
+            self.audio_stream = AudioStreamProcessor(
+                server_host=server_host,
+                server_port=server_port,
+                language="zh",
+                input_device_index=input_device_index,
+                output_device_index=output_device_index
+            )
+            self.chat_bot = ChatBot()
+            self.tts = TextToSpeech(audio_stream=self.audio_stream, audio_player=None)
+
         self.motion_analyzer = MotionAnalyzer()
         
         # 线程锁（保护共享状态）
@@ -71,10 +84,105 @@ class StreamController:
         self.log_file_path = os.path.join(self.log_dir, "reply.txt")
         self.current_user_text = ""
         
-        # 设置音频流回调
-        self._setup_audio_callbacks()
+        # 设置音频流回调（旧链路）
+        if self.audio_stream is not None:
+            self._setup_audio_callbacks()
         
-        print("🎯 流式控制器初始化完成 (ROS控制已切换至命令行模式)")
+        if self.use_live_s2s:
+            print("🎯 流式控制器初始化完成 (Gemini Live S2S + MotionAnalyzer)")
+        else:
+            print("🎯 流式控制器初始化完成 (ROS控制已切换至命令行模式)")
+
+    def _build_live_prompt(self) -> str:
+        language_hint = {
+            "粤语": "请优先使用粤语回答。",
+            "普通话": "请使用简体中文普通话回答。",
+            "英语": "Please answer in English.",
+        }.get(self.current_language, "请使用简体中文普通话回答。")
+        return f"{self.system_prompt}\n\n{language_hint}"
+
+    def _create_live_bridge(self):
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("缺少 GEMINI_API_KEY，无法启动 Gemini Live S2S")
+
+        model = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
+        self.gemini_live_bridge = GeminiLiveS2SBridge(
+            api_key=api_key,
+            model=model,
+            system_prompt=self._build_live_prompt(),
+            input_device_index=self.input_device_index,
+            output_device_index=self.output_device_index,
+            on_user_partial=lambda t: self._on_transcription_update(t, False),
+            on_user_final=self._on_live_user_final,
+            on_ai_partial=self._on_live_ai_partial,
+            on_ai_final=self._on_live_ai_final,
+            on_error=self._on_audio_error,
+        )
+
+    def _on_live_user_final(self, text: str):
+        if not text:
+            return
+        self.current_user_text = text.strip()
+        if self.on_final_result:
+            self.on_final_result(self.current_user_text)
+
+    def _on_live_ai_partial(self, text: str):
+        if text:
+            self._update_state("speaking")
+
+    def _dispatch_motion_for_response(self, response: str):
+        def run_motion_bridge():
+            try:
+                sentences = response.replace("。", "|").replace("，", "|").replace(".", "|").replace(",", "|").replace("?", "|").replace("？", "|").split("|")
+                valid_sentences = [s.strip() for s in sentences if s.strip()]
+
+                if not valid_sentences:
+                    print("⚠️ 动作执行失败: AI回复拆分后无有效句子", flush=True)
+                    return
+
+                print(f"🤖 [Motion Control] AI回复拆分出 {len(valid_sentences)} 个有效句子，开始逐个匹配动作...")
+                last_action = None
+
+                for idx, sentence in enumerate(valid_sentences, 1):
+                    YELLOW = "\033[33m"
+                    RESET = "\033[0m"
+                    print(f"\n🤖 [Motion Control] 处理第{idx}句：{YELLOW}{sentence}{RESET}")
+                    matched_action = self.motion_analyzer.analyze_text(sentence)
+
+                    if matched_action:
+                        print(f"matched_action: {matched_action}, last_action: {last_action}")
+                        if matched_action == last_action:
+                            print(f"⏭️ [Motion Control] 第{idx}句动作【{matched_action}】与上一句相同，跳过发送")
+                        else:
+                            cmd = f'ros2 topic pub -1 /arm_command std_msgs/msg/String "{{data: \'{matched_action}\'}}" > /dev/null 2>&1'
+                            os.system(cmd)
+                            RED = "\033[31m"
+                            RESET = "\033[0m"
+                            print(f"🚀 [Robot Control] 第{idx}句已发送动作指令: {RED}{matched_action}{RESET}", flush=True)
+                            last_action = matched_action
+                    else:
+                        print(f"⚠️ [Motion Control] 第{idx}句无匹配动作")
+                        last_action = None
+
+            except Exception as e:
+                print(f"⚠️ 动作执行失败: {e}", flush=True)
+
+        threading.Thread(target=run_motion_bridge, daemon=True).start()
+
+    def _on_live_ai_final(self, response: str):
+        with self._state_lock:
+            if not response:
+                return
+
+            print(f"\n\n💬 AI响应: {response}", flush=True)
+            self._dispatch_motion_for_response(response)
+
+            if self.on_ai_response:
+                self.on_ai_response(response)
+
+            self._save_conversation_to_file(self.current_user_text, response)
+            self._update_state("listening")
 
     def _load_system_prompt(self):
         """加载系统提示词"""
@@ -107,59 +215,7 @@ class StreamController:
         with self._state_lock:
             if success and response:
                 print(f"\n\n💬 AI响应: {response}", flush=True)
-                
-                # ========== 核心修改：多分句多动作执行+去重逻辑 ==========
-                def run_motion_bridge():
-                    try:
-                        # 1. 按句号拆分AI回复（兼容中文/英文句号）
-                        sentences = response.replace("。", "|").replace("，", "|").replace(".", "|").replace(",", "|").replace("?", "|").replace("？", "|").split("|")
-                        # 清洗空句子和空白字符
-                        valid_sentences = [s.strip() for s in sentences if s.strip()]
-                        
-                        if not valid_sentences:
-                            print(f"⚠️ 动作执行失败: AI回复拆分后无有效句子", flush=True)
-                            return
-                        
-                        print(f"🤖 [Motion Control] AI回复拆分出 {len(valid_sentences)} 个有效句子，开始逐个匹配动作...")
-                        
-                        # 新增：记录上一句的动作（用于去重）
-                        last_action = None
-                        
-                        # 2. 逐个句子匹配动作并发送ROS2指令
-                        for idx, sentence in enumerate(valid_sentences, 1):
-                            YELLOW = "\033[33m"
-                            RESET = "\033[0m"
-                            print(f"\n🤖 [Motion Control] 处理第{idx}句：{YELLOW}{sentence}{RESET}")
-                            # 调用原有analyze_text（单句匹配单个动作）
-                            matched_action = self.motion_analyzer.analyze_text(sentence)
-                            
-                            if matched_action:
-                                # 核心判断：如果当前动作和上一句相同，跳过发送
-                                print(f"matched_action: {matched_action}, last_action: {last_action}")  # 调试日志
-                                if matched_action == last_action:
-                                    print(f"⏭️ [Motion Control] 第{idx}句动作【{matched_action}】与上一句相同，跳过发送")
-                                else:
-                                    # 发送ROS2动作指令
-                                    cmd = f'ros2 topic pub -1 /arm_command std_msgs/msg/String "{{data: \'{matched_action}\'}}" > /dev/null 2>&1'
-                                    os.system(cmd) 
-                                    RED = "\033[31m"
-                                    RESET = "\033[0m"
-                                    #matched_action = f"{RED}{matched_action}{RESET}"
-                                    print(f"🚀 [Robot Control] 第{idx}句已发送动作指令: {RED}{matched_action}{RESET}", flush=True)
-                                    # 更新上一句动作记录
-                                    last_action = matched_action
-                                    # 可选：动作执行间隔（避免指令发送过快）
-                                    #time.sleep(0.5)
-                            else:
-                                print(f"⚠️ [Motion Control] 第{idx}句无匹配动作")
-                                # 无匹配动作时，重置last_action（避免影响下一句）
-                                last_action = None
-                                
-                    except Exception as e:
-                        print(f"⚠️ 动作执行失败: {e}", flush=True)
-                
-                # ========== 保留原有线程调用逻辑 ==========
-                threading.Thread(target=run_motion_bridge, daemon=True).start()
+                self._dispatch_motion_for_response(response)
 
                 # 原有流程：回调+保存对话
                 if self.on_ai_response:
@@ -188,14 +244,18 @@ class StreamController:
         if language in self.languages:
             self.current_language = language
             whisper_lang = self.languages[language]["whisper"]
-            self.audio_stream.language = whisper_lang
+            if self.audio_stream is not None:
+                self.audio_stream.language = whisper_lang
             if self.on_state_change:
                 self.on_state_change("language_changed", {"language": language})
 
     def set_devices(self, input_device_index: Optional[int], output_device_index: Optional[int]):
         if input_device_index is not None:
-            self.audio_stream.set_input_device(input_device_index)
+            self.input_device_index = input_device_index
+            if self.audio_stream is not None:
+                self.audio_stream.set_input_device(input_device_index)
         if output_device_index is not None:
+            self.output_device_index = output_device_index
             self.audio_player.set_output_device(output_device_index)
 
     def start_conversation(self):
@@ -208,8 +268,15 @@ class StreamController:
             # 清空历史转录结果
             self.current_transcription = ""
             self.current_user_text = ""
-            
-            # 启动音频流（不管之前状态，直接启动）
+
+            if self.use_live_s2s:
+                if self.gemini_live_bridge is None:
+                    self._create_live_bridge()
+                self.gemini_live_bridge.start()
+                print("▶️  已启动 Gemini Live S2S 持续会话")
+                return True
+
+            # 启动音频流（旧链路）
             if not self.audio_stream.is_streaming:
                 self.audio_stream.is_running = True
                 self.audio_stream.start_streaming()
@@ -226,7 +293,12 @@ class StreamController:
     def stop_conversation(self):
         """修改：停止录音，状态仍设为listening（无idle）"""
         try:
-            self.audio_stream.stop_streaming()
+            if self.use_live_s2s:
+                if self.gemini_live_bridge is not None:
+                    self.gemini_live_bridge.stop()
+                    self.gemini_live_bridge = None
+            else:
+                self.audio_stream.stop_streaming()
             # 停止后仍保留listening状态，方便下次直接转录
             self.conversation_state = "listening"
             self._update_state("listening")
@@ -263,6 +335,8 @@ class StreamController:
 
 
     def _process_final_text(self, text: str):
+        if self.use_live_s2s:
+            return
         try:
             self._update_state("processing")
             if self.on_final_result: self.on_final_result(text)
@@ -272,6 +346,8 @@ class StreamController:
             self._update_state("listening")
 
     def _speak_response(self, text: str):
+        if self.use_live_s2s:
+            return
         print(f"📢 开始执行_tts", flush=True)
         try:
             # 1. TTS播报前暂停识别（直接调用audio_stream）
@@ -297,6 +373,8 @@ class StreamController:
 
 
     def _on_tts_complete(self, success: bool, error: str = None):
+        if self.use_live_s2s:
+            return
         try:
             print(f"🔍 TTS兜底回调触发: success={success}, error={error}")
             # ✅ 移除所有直接操作 audio_stream 的代码
@@ -311,6 +389,8 @@ class StreamController:
 
 
     def _on_audio_error(self, error: str):
+        if self.on_error:
+            self.on_error(error)
         self._update_state("listening")
 
     def _update_state(self, new_state: str):
@@ -327,7 +407,23 @@ class StreamController:
         return self.conversation_state
 
     def list_audio_devices(self):
-        return self.audio_stream.list_audio_devices()
+        if self.audio_stream is not None:
+            return self.audio_stream.list_audio_devices()
+
+        # Live模式不启用 AudioStreamProcessor 时，直接从 AudioPlayer 枚举输出设备。
+        # 输入设备枚举复用 pyaudio。
+        input_devices = []
+        output_devices = self.audio_player.list_output_devices()
+        try:
+            p = self.audio_player.p
+            if p is not None:
+                for i in range(p.get_device_count()):
+                    info = p.get_device_info_by_index(i)
+                    if info.get("maxInputChannels", 0) > 0:
+                        input_devices.append({"index": i, "name": info.get("name", str(i))})
+        except Exception:
+            pass
+        return input_devices, output_devices
 
     def set_state_change_callback(self, callback: Callable): self.on_state_change = callback
     def set_transcription_callback(self, callback: Callable): self.on_transcription_update = callback
