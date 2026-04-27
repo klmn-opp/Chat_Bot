@@ -63,7 +63,7 @@ class StreamController:
         self.current_language = "普通话"
         
         # 状态管理
-        self.conversation_state = "listening"  # idle, listening, processing, speaking
+        self.conversation_state = "idle"  # idle, listening, processing, speaking
         self.current_transcription = ""
         
         # 回调函数
@@ -108,6 +108,11 @@ class StreamController:
             raise ValueError("缺少 DOUBAO_APP_ID / DOUBAO_ACCESS_KEY，无法启动 Doubao Live S2S")
 
         model = os.getenv("DOUBAO_MODEL", "1.2.1.1")
+        print(
+            f"[StreamController] create live bridge: model={model}, "
+            f"input_device={self.input_device_index}, output_device={self.output_device_index}",
+            flush=True,
+        )
         self.live_s2s_bridge = DoubaoLiveS2SBridge(
             app_id=app_id,
             access_key=access_key,
@@ -125,12 +130,14 @@ class StreamController:
     def _on_live_user_final(self, text: str):
         if not text:
             return
+        print(f"[StreamController] live user final: {text[:120]}", flush=True)
         self.current_user_text = text.strip()
         if self.on_final_result:
             self.on_final_result(self.current_user_text)
 
     def _on_live_ai_partial(self, text: str):
         if text:
+            print(f"[StreamController] live ai partial: {text[:120]}", flush=True)
             self._update_state("speaking")
 
     def _dispatch_motion_for_response(self, response: str):
@@ -185,6 +192,7 @@ class StreamController:
 
             self._save_conversation_to_file(self.current_user_text, response)
             self._update_state("listening")
+            print("[StreamController] live ai final handled, state->listening", flush=True)
 
     def _load_system_prompt(self):
         """加载系统提示词"""
@@ -264,13 +272,13 @@ class StreamController:
         else:
             self.audio_player.set_output_device(output_device_index)
 
-        # Live bridge is created with fixed device indices; restart if running so changes take effect.
+        # Live模式下，设备切换后重建bridge，避免复用旧会话状态导致协议异常。
         if self.use_live_s2s and self.live_s2s_bridge is not None:
             was_started = getattr(self.live_s2s_bridge, "_started", False)
             if was_started:
                 self.live_s2s_bridge.stop()
-            self.live_s2s_bridge.input_device_index = self.input_device_index
-            self.live_s2s_bridge.output_device_index = self.output_device_index
+            self.live_s2s_bridge = None
+            self._create_live_bridge()
             if was_started:
                 self.live_s2s_bridge.start()
 
@@ -310,7 +318,7 @@ class StreamController:
             return False
         
     def stop_conversation(self):
-        """修改：停止录音，状态仍设为listening（无idle）"""
+        """停止录音并回到idle状态"""
         try:
             if self.use_live_s2s:
                 if self.live_s2s_bridge is not None:
@@ -318,20 +326,21 @@ class StreamController:
                     self.live_s2s_bridge = None
             else:
                 self.audio_stream.stop_streaming()
-            # 停止后仍保留listening状态，方便下次直接转录
-            self.conversation_state = "listening"
-            self._update_state("listening")
+            self.conversation_state = "idle"
+            self._update_state("idle")
             print("⏹️  已停止持续录音+自动转录")
             return True
         except Exception as e:
             print(f"❌ 停止持续录音失败: {e}")
-            self.conversation_state = "listening"
-            self._update_state("listening")
+            self.conversation_state = "idle"
+            self._update_state("idle")
             return False
         
 
     def _on_transcription_update(self, text: str, is_final: bool = False):
         self.current_transcription = text
+        if text:
+            print(f"[StreamController] transcription update: final={is_final}, text={text[:120]}", flush=True)
         if self.on_transcription_update:
             self.on_transcription_update(text, is_final)
 
