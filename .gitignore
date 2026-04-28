@@ -19,3 +19,4 @@ conversation_logs/
 .env
 *.rtf
 *.txt
+temp/*
