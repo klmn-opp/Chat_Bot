@@ -838,10 +838,10 @@ class DoubaoLiveS2SBridge:
 						await asyncio.sleep(0.2)
 						now = time.monotonic()
 						if now - last_heartbeat >= 2.0:
-							# self._debug(
-							# 	"heartbeat: "
-							# 	f"tx_audio={self._tx_audio_packets}, rx_audio={self._rx_audio_packets}, rx_events={self._rx_events}"
-							# )
+							self._debug(
+								"heartbeat: "
+								f"tx_audio={self._tx_audio_packets}, rx_audio={self._rx_audio_packets}, rx_events={self._rx_events}"
+							)
 							last_heartbeat = now
 
 						for loop_name, task in (

@@ -4,8 +4,16 @@ import queue  # 新增：导入队列模块
 # 强制定义PY_SSIZE_T_CLEAN宏，解决pyaudio兼容问题
 if not os.environ.get('PY_SSIZE_T_CLEAN'):
     os.environ['PY_SSIZE_T_CLEAN'] = '1'
-# 兼容Linux下的pyaudio加载
-sys.setdlopenflags(sys.getdlopenflags() | 0x00000010)  # RTLD_GLOBAL
+
+# 仅在导入 pyaudio 时临时开启 RTLD_GLOBAL，避免污染后续 C 扩展导入
+_original_dlopenflags = sys.getdlopenflags()
+try:
+    if hasattr(os, 'RTLD_GLOBAL'):
+        sys.setdlopenflags(_original_dlopenflags | os.RTLD_GLOBAL)
+    import pyaudio
+finally:
+    sys.setdlopenflags(_original_dlopenflags)
+
 import asyncio
 import edge_tts
 import time
