@@ -106,7 +106,7 @@ class StreamController:
         app_id = os.getenv("DOUBAO_APP_ID")
         access_key = os.getenv("DOUBAO_ACCESS_KEY")
         if not app_id or not access_key:
-            raise ValueError("缺少 DOUBAO_APP_ID / DOUBAO_ACCESS_KEY，无法启动 Doubao Live S2S")
+            raise ValueError("缺少 DOUBAO_APP_ID / DOUBAO_ACCESS_KEY，无法启动 Doubao Live S2S，请在.env 文件中配置环境变量")
 
         model = os.getenv("DOUBAO_MODEL", "1.2.1.1")
         print(

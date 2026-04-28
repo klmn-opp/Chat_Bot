@@ -163,3 +163,27 @@ python main.py
 
 仓库未内置 `LICENSE` 文件。若需开源发布，请补充许可证（如 MIT 或 Apache-2.0）。
 
+**设备兼容性与可调参数**
+
+- **输入设备索引 (`input_device_index`)**: 在 [core/audio_stream.py](core/audio_stream.py) 和 [core/stream_controller.py](core/stream_controller.py) 中使用；不要硬编码索引（当前代码中有 `input_device_index = 2` 的示例），推荐先自动探测 `p.get_default_input_device_info()` 或遍历 `p.get_device_info_by_index()` 并在 UI/`.env` 中暴露供选择。
+- **采样率 (`RATE`)**: 采集时优先使用设备的 `defaultSampleRate`（见 [core/audio_stream.py](core/audio_stream.py)）；若目标服务期望 16000Hz，需在发送前重采样到 16000（实时可用 `audioop.ratecv()` 或外部库如 `samplerate`/`resampy`）。
+- **声道数 (`CHANNELS`)**: 读取设备 `maxInputChannels`，一般将多声道转为单声道再送入模型（可用 `audioop.tomono()`）。
+- **帧长度 / 缓冲 (`CHUNK`)**: 以时间窗定义为佳，例如 20ms 帧 -> `frames = int(0.02 * sample_rate)`；对于 16kHz 即 320 帧（Doubao 推荐），设定为 `CHUNK = frames` 或使用能整除帧的缓冲大小。
+- **采样格式 (`FORMAT`)**: 使用 `pyaudio.paInt16` 保持与大多数服务与 `audioop` 兼容。
+- **样本宽度 / 字节序 (`sample_width`)**: 计算自 `bits_per_sample // 8`，确保 `audioop` 和写 WAV/播放时一致。
+- **输出设备索引 (`output_device_index`)**: 在 [ui/components/audio_player.py](ui/components/audio_player.py) 使用，避免硬编码，允许 UI 切换并校验 `maxOutputChannels`。
+- **系统/运行时参数**: 在 Linux 可通过环境变量 `PYAUDIO_INPUT_DEVICE` / `PYAUDIO_OUTPUT_DEVICE` 指定后端（例如 `pulse`），并在导入 `pyaudio` 前确保 `PY_SSIZE_T_CLEAN` 已设置以避免兼容问题（当前 `core/tts.py` 有示例）。
+
+简短示例（计算 20ms 帧与必要重采样）：
+
+```python
+# device_rate = int(device_info['defaultSampleRate'])
+frames = int(0.02 * device_rate)
+if device_rate != 16000:
+	# 使用 audioop.ratecv 在发送前把 int16 bytes 从 device_rate -> 16000
+	converted, state = audioop.ratecv(raw_bytes, 2, 1, device_rate, 16000, None)
+	# 然后把 converted 按 320 字节块发送
+```
+
+参考文件： [core/audio_stream.py](core/audio_stream.py), [core/doubao_live_s2s.py](core/doubao_live_s2s.py), [ui/components/audio_player.py](ui/components/audio_player.py)
+
