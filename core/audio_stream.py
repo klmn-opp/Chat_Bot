@@ -794,8 +794,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n\n⚠️  检测到手动中断，停止录音...")
         processor.stop_streaming()
-<<<<<<< HEAD
         print("👋 程序退出")
-=======
-        print("👋 程序退出")
->>>>>>> 787a0c2 (参数实机适配，tts修复，key记录彻底抹除)
