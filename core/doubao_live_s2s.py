@@ -164,6 +164,10 @@ class DoubaoLiveS2SBridge:
 
 		self._current_user_partial = ""
 		self._current_ai_partial = ""
+		# 半双工回声抑制：输出端正在播放 AI 语音时，丢弃麦克风帧，避免把播报内容再次送入 ASR
+		self._output_active = threading.Event()
+		self._last_output_audio_at = 0.0
+		self._post_output_hold_sec = 0.35
 
 		# Debug counters
 		self._tx_audio_packets = 0
@@ -713,6 +717,9 @@ class DoubaoLiveS2SBridge:
 		self._debug("send audio loop started")
 		while not self._stop_event.is_set():
 			pcm = await asyncio.to_thread(input_stream.read, self._chunk, False)
+			if self._output_active.is_set():
+				# AI 正在播报时，直接丢弃麦克风帧，避免自身声音回灌到识别链路。
+				continue
 			normalized = self._ensure_mono_16k(pcm, self._source_rate, self._source_channels)
 			if normalized:
 				self._tx_audio_packets += 1
@@ -733,8 +740,12 @@ class DoubaoLiveS2SBridge:
 			try:
 				pcm = await asyncio.wait_for(self._audio_out_queue.get(), timeout=0.25)
 			except asyncio.TimeoutError:
+				if self._output_active.is_set() and (time.monotonic() - self._last_output_audio_at) > self._post_output_hold_sec:
+					self._output_active.clear()
 				continue
 
+			self._output_active.set()
+			self._last_output_audio_at = time.monotonic()
 			if self._out_sample_rate != 24000:
 				pcm, _ = audioop.ratecv(pcm, self._sample_width, 1, 24000, self._out_sample_rate, None)
 			if len(pcm) % self._sample_width != 0:
@@ -744,6 +755,7 @@ class DoubaoLiveS2SBridge:
 					continue
 
 			await asyncio.to_thread(output_stream.write, pcm)
+			self._last_output_audio_at = time.monotonic()
 			if self._rx_audio_packets <= 5 or self._rx_audio_packets % 50 == 0:
 				self._debug(f"audio packet played: size={len(pcm)}")
 
@@ -877,6 +889,7 @@ class DoubaoLiveS2SBridge:
 					_ = self._audio_out_queue.get_nowait()
 			except Exception:
 				pass
+			self._output_active.clear()
 
 			try:
 				if input_stream is not None:
