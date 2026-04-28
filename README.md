@@ -1,102 +1,165 @@
-# 智护夜巡 · 实时语音对话系统（Stream UI）
+# 智护夜巡实时语音对话系统（Chat_Bot）
 
-一个支持实时语音交互的桌面应用原型。当前默认启用 Gemini Live S2S（语音直连语音）以降低交互延迟，同时保留文本转写用于动作语义分析与控制。
+一个基于 Tkinter 的实时语音对话原型工程，默认使用 Doubao Live S2S（语音输入直连语音输出），并在收到 AI 最终文本后执行动作语义匹配与 ROS2 动作下发。
 
-## 功能特性
-- 实时录音与设备选择：列出输入/输出音频设备，选择并开始/停止录音与播放
-- 低延迟 S2S：集成 Gemini Live API 实时音频输入/输出
-- 文本转写并行动作控制：获取模型输出文本后交给 `MotionAnalyzer` 生成 embedding，并发送 ROS2 动作指令
-- 兼容旧链路：可切换为本地 Whisper + Chat API + Edge TTS 的传统串行流程
-- 现代化 UI：基于 Tkinter 的流式对话界面，显示实时识别、最终文本与系统状态
+## 当前默认运行链路
 
-## 分支结构
-- dev 为实际上的main 旧版本
-- main 为实际上的dev 用于开发新版本
-- feature 为机器人上部署版本 与lhs本地主要区别为语音识别的参数
-  
-## 目录结构
-```
-configs/                # 配置文件（系统提示词等）
-core/                   # 语音流、TTS、聊天逻辑
-ui/                     # Tkinter 组件与主界面
-main.py                 # 启动入口（桌面 UI）
-requirements.txt        # Python 依赖
-README.md               # 本文件
-```
+`main.py` -> `ui/medical_robot_stream_ui.py` -> `core/stream_controller.py` -> `core/doubao_live_s2s.py` -> `core/motion_analyzer.py`
+
+说明：
+- 默认是实时链路（`USE_GEMINI_LIVE_S2S=1`），变量名沿用历史命名，但当前实际使用的是 Doubao Live。
+- 旧链路仍保留为回退方案：`audio_stream.py` + `chat.py` + `tts.py`。
+
+## 功能概览
+
+- 实时语音对话：麦克风采集、WebSocket 双向流、扬声器播放。
+- 文本回调与界面联动：用户中间识别、最终文本、AI 最终回复同步到 UI。
+- 动作匹配：对 AI 文本按句拆分，计算 embedding 相似度并匹配动作标签。
+- 指令下发：匹配成功后发送 ROS2 topic 指令。
+- 旧链路回退：可切为本地 Whisper + Chat API + Edge TTS 串行流程。
+
+## 目录与文件说明
+
+### 根目录
+
+- `main.py`：应用入口，加载 `.env`，启动 Tk 主窗口。
+- `requirements.txt`：Python 依赖清单。
+- `README.md`：本说明文档。
+- `.env`：运行时环境变量（本地私有，不应提交密钥）。
+
+### `configs/`
+
+- `configs/languages.json`：语言映射配置。
+- `configs/system_prompt.txt`：系统提示词模板，`StreamController` 会加载并注入对话上下文。
+
+### `core/`
+
+- `core/stream_controller.py`：全链路控制器，统一管理状态、回调、日志、链路选择和动作下发。
+- `core/doubao_live_s2s.py`：Doubao 实时语音桥接，负责协议封包、音频收发、事件解析与文本回调。
+- `core/motion_analyzer.py`：动作 embedding 匹配核心，基于预置向量与在线 embedding 计算相似度。
+- `core/audio_stream.py`：旧链路录音与 Whisper 识别模块。
+- `core/chat.py`：旧链路文本对话模块（当前走 SiliconFlow chat completions）。
+- `core/tts.py`：旧链路 TTS 模块（Edge TTS 合成、格式转换、播放协调）。
+
+### `ui/`
+
+- `ui/medical_robot_stream_ui.py`：主界面与交互事件入口。
+- `ui/components/conversation_manager.py`：会话状态与历史管理。
+- `ui/components/realtime_display.py`：实时识别文本与正式消息显示逻辑。
+- `ui/components/audio_player.py`：独立音频播放器，负责 WAV 播放与设备切换。
+
+### `tool/`
+
+- `tool/check_audio_devices.py`：列出可用输入设备（麦克风）。
+- `tool/terminal_input.py`：命令行直输文本测试入口（绕过 UI，复用控制器逻辑）。
+- `tool/get_vectors.py`：离线生成动作 embedding 向量的小工具脚本。
+
+### 运行产物目录
+
+- `conversation_logs/reply.txt`：对话结果日志。
+- `temp/`：TTS/音频转换临时文件（`.mp3`、`.wav`）。
+
+## 模块协作关系
+
+### 1. 启动阶段
+
+- `main.py` 通过 `load_dotenv()` 加载环境变量。
+- 初始化 `MedicalRobotStreamUI`，UI 内部创建 `StreamController`。
+
+### 2. 实时对话阶段（默认）
+
+- `StreamController` 读取 `DOUBAO_APP_ID`、`DOUBAO_ACCESS_KEY`、`DOUBAO_MODEL` 创建 `DoubaoLiveS2SBridge`。
+- `DoubaoLiveS2SBridge` 持续处理麦克风帧与服务端音频帧。
+- 文本事件回调到 `StreamController`，再转发给 UI 显示。
+
+### 3. 动作执行阶段
+
+- AI 最终文本进入 `_dispatch_motion_for_response()`。
+- 逐句调用 `MotionAnalyzer.analyze_text()` 匹配动作。
+- 匹配成功后执行 `ros2 topic pub` 发送动作指令。
+
+### 4. 回退链路（可选）
+
+- 当 `USE_GEMINI_LIVE_S2S=0` 时，走 `AudioStreamProcessor` -> `ChatBot` -> `TextToSpeech`。
 
 ## 环境要求
-- 操作系统：macOS / Linux / Windows（开发主要在 macOS 上验证）
-- Python：建议 3.10 ~ 3.12（系统自带 Tk 支持最省心）
-- 系统依赖：
-  - PortAudio（PyAudio 依赖）
-  - FFmpeg（用于音频转换，pydub 将调用）
-  - Tk/Tcl（Tkinter 依赖；大多数系统 Python 自带，Homebrew/pyenv Python 可能需要额外配置）
 
-macOS 常用安装命令（可选）：
-```
-brew install portaudio ffmpeg
+- Python：建议 `3.10` 到 `3.12`。
+- 系统组件：
+- `PortAudio`（`pyaudio` 依赖）。
+- `ffmpeg`（`pydub` 音频转换依赖）。
+- `Tk/Tcl`（`tkinter` 依赖，通常系统 Python 自带）。
+
+Linux 常用安装示例：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y portaudio19-dev ffmpeg python3-tk
 ```
 
-## 安装
-1) 克隆本仓库后，在项目根目录创建并激活虚拟环境：
-```
+## 安装与运行
+
+```bash
 python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\\Scripts\\activate
-```
-
-2) 安装依赖：
-```
+source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
-```
-
-> 说明：`requirements.txt` 中固定了 `numpy<2` 以避免与 Numba 的二进制不兼容（Whisper 依赖 Numba）。如需升级，请确保对应的 Numba/llvmlite 版本也兼容。
-
-## 运行
-- 启动桌面 UI：
-```
 python main.py
 ```
 
-首次启动：
-- 点击“开始对话”进入录音状态，再次点击停止并触发识别与 AI 回复
-- 点击“设备设置”可选择输入/输出音频设备
-- “语言”按钮可在「粤语 / 普通话 / 英语」间切换（影响 Whisper 识别与 TTS 声音）
+## 依赖说明
 
-## 配置
-- 系统提示词：`configs/system_prompt.txt`（可按需修改）
-- Gemini Live（默认链路）环境变量：
-  - `GEMINI_API_KEY`：Gemini API Key（必填）
-  - `GEMINI_LIVE_MODEL`：可选，默认 `gemini-3.1-flash-live-preview`
-  - `USE_GEMINI_LIVE_S2S`：可选，默认 `1`；设为 `0` 可回退到旧链路
-- 旧链路（当 `USE_GEMINI_LIVE_S2S=0` 时）环境变量：
-  - `DEEPSEEK_API_KEY`：原 Chat API Key
-- 若希望从 `.env` 加载变量，可在入口处调用 `python-dotenv` 的 `load_dotenv()`（当前代码未默认调用）。
+`requirements.txt` 当前包含：
 
-## 已知问题与排查
-- Tkinter 报错 `No module named '_tkinter'`：
-  - 使用系统自带 Python（通常自带 Tk），或为 Homebrew/pyenv Python 安装/配置 Tk 支持
-- Numpy/Numba 不兼容导致 Whisper 导入失败：
-  - 已在 `requirements.txt` 固定 `numpy<2`，请在全新虚拟环境中安装
-- 无法播放/录制：
-  - 请确认系统已安装 PortAudio 与声卡权限允许访问麦克风/扬声器
-- MP3 转 WAV 失败：
-  - 安装 FFmpeg 或确保 `pydub` 可正常导入并调用系统 FFmpeg
+- `requests`
+- `python-dotenv`
+- `edge-tts`
+- `pyaudio`
+- `numpy<2.0`
+- `openai-whisper`
+- `pydub`
+- `torch`
+- `google-genai`
+- `websockets`
 
-## 开发说明
-- 主要模块：
-  - `core/audio_stream.py`：本地 Whisper 录音与识别
-  - `core/chat.py`：调用外部 Chat API 生成回复
-  - `core/tts.py`：Edge TTS 合成与播放（配合 `ui/components/audio_player.py`）
-  - `core/stream_controller.py`：贯穿录音→识别→对话→播报状态机
-  - `ui/medical_robot_stream_ui.py`：主界面
-- 代码风格：尽量保持模块职责单一、线程安全（录音/播放均使用后台线程）
+额外注意：
 
-## 开源许可
-请根据你的需求选择开源许可证并在仓库根目录添加相应的 `LICENSE` 文件（推荐 MIT 或 Apache-2.0）。
+- `core/motion_analyzer.py` 使用了 `deep_translator`，但该包目前未写入 `requirements.txt`。
 
-## 致谢
-- [openai/whisper](https://github.com/openai/whisper)
-- [edge-tts](https://github.com/rany2/edge-tts)
-- 以及社区提供的相关依赖与工具
+## 环境变量
+
+### 实时链路（默认）
+
+- `DOUBAO_APP_ID`：必填。
+- `DOUBAO_ACCESS_KEY`：必填。
+- `DOUBAO_MODEL`：可选，默认 `1.2.1.1`。
+- `USE_GEMINI_LIVE_S2S`：可选，默认 `1`。设为 `0` 走旧链路。
+
+### 动作匹配
+
+- `OPENAI_API_KEY`：`MotionAnalyzer` 在线 embedding 请求使用。
+
+### 旧链路回退
+
+- `DEEPSEEK_API_KEY`：`core/chat.py` 读取。
+
+## 已知注意事项
+
+- `configs/system_prompt.txt` 当前存在 Git 冲突标记（`<<<<<<<`、`=======`、`>>>>>>>`），需要先清理，否则提示词内容不确定。
+- `tool/get_vectors.py` 中有硬编码 API Key 字符串，不建议保留在仓库中。
+- `core/doubao_live_s2s.py` 中 `API_APP_KEY` 为硬编码常量，涉及部署时建议改为环境变量。
+- `USE_GEMINI_LIVE_S2S` 命名与实际服务不一致，仅为历史兼容开关。
+- `temp/` 与 `conversation_logs/` 会持续增长，建议定期清理。
+- `core/audio_stream.py` 对输入设备索引和采样参数有较强耦合，旧链路下跨设备兼容性需实机验证。
+
+## 快速排查
+
+- 无法录音/播放：先运行 `python tool/check_audio_devices.py` 检查设备索引与权限。
+- 启动时报 `DOUBAO_*` 缺失：检查 `.env` 是否加载成功。
+- 动作匹配异常：确认 `OPENAI_API_KEY` 已设置，且可访问 embedding 服务。
+- 回退链路异常：确认 `DEEPSEEK_API_KEY` 与 `ffmpeg`、`pyaudio` 可用。
+
+## 许可
+
+仓库未内置 `LICENSE` 文件。若需开源发布，请补充许可证（如 MIT 或 Apache-2.0）。
 
