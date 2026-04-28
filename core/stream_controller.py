@@ -195,7 +195,7 @@ class StreamController:
                             
                             RED = "\033[31m"
                             RESET = "\033[0m"
-                            print(f"🚀 [Robot Control] 第{idx}句已发送动作指令: {RED}{matched_action}{RESET}", flush=True)
+                            print(f"[Robot Control] 第{idx}句已发送动作指令: {RED}{matched_action}{RESET}", flush=True)
                             last_action = matched_action
                     else:
                         print(f"⚠️ [Motion Control] 第{idx}句无匹配动作")
