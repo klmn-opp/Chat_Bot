@@ -144,7 +144,8 @@ class StreamController:
     def _dispatch_motion_for_response(self, response: str):
         def run_motion_bridge():
             try:
-                sentences = response.replace("。", "|").replace("，", "|").replace(".", "|").replace(",", "|").replace("?", "|").replace("？", "|").split("|")
+                #sentences = response.replace("。", "|").replace("，", "|").replace(".", "|").replace(",", "|").replace("?", "|").replace("？", "|").split("|")
+                sentences = response.replace("。", "|").replace(".", "|").replace("！", "|").replace("!", "|").replace("?", "|").replace("？", "|").split("|")
                 valid_sentences = [s.strip() for s in sentences if s.strip()]
 
                 if not valid_sentences:
