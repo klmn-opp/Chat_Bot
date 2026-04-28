@@ -59,7 +59,7 @@ class MotionAnalyzer:
         print("✅ 动作向量加载完成（无pkl），共{}个动作".format(len(self.motion_vectors)))
 
     # 以下所有方法（get_openai_embedding/cosine_similarity/analyze_text等）保持不变
-    def get_openai_embedding(self, text, model="BAAI/bge-m3"):
+    def get_openai_embedding(self, text, model="BAAI/bge-m3", retry_count=0, max_retries=3):
         if not text:
             return np.zeros(1024).tolist()
 
@@ -78,6 +78,9 @@ class MotionAnalyzer:
         
         try:
             print("\n[MotionAnalyzer] start Embedding (SiliconFlow)...")
+            # Debug: show a preview of the text being sent to embedding service
+            preview = text if len(text) <= 200 else text[:200] + '...'
+            print(f"[MotionAnalyzer] embedding input preview: {preview!r}")
             embedding_start = time.time()
             response = requests.post(url, headers=headers, json=data, timeout=10)
             
@@ -103,9 +106,25 @@ class MotionAnalyzer:
 
                 return result['data'][0]['embedding']
             else:
-                print(f"[MotionAnalyzer] SiliconFlow API 错误: {response.status_code} - {response.text}")
-                return np.zeros(1024).tolist()
+                # Handle rate limiting (429) or server errors (5xx) with exponential backoff
+                if response.status_code in [429, 500, 502, 503, 504] and retry_count < max_retries:
+                    wait_time = 0.5 * (2 ** retry_count)  # 0.5s, 1s, 2s exponential backoff
+                    print(f"[MotionAnalyzer] API返回 {response.status_code} (速率限制/服务器错误)，{wait_time}秒后重试... (重试{retry_count+1}/{max_retries})")
+                    time.sleep(wait_time)
+                    return self.get_openai_embedding(text, model, retry_count=retry_count+1, max_retries=max_retries)
+                else:
+                    print(f"[MotionAnalyzer] SiliconFlow API 错误 [{response.status_code}]: {response.text}")
+                    return np.zeros(1024).tolist()
                 
+        except requests.Timeout as e:
+            if retry_count < max_retries:
+                wait_time = 0.5 * (2 ** retry_count)
+                print(f"[MotionAnalyzer] 请求超时，{wait_time}秒后重试... (重试{retry_count+1}/{max_retries})")
+                time.sleep(wait_time)
+                return self.get_openai_embedding(text, model, retry_count=retry_count+1, max_retries=max_retries)
+            else:
+                print(f"[MotionAnalyzer] 获取 embedding 超时 (已重试{max_retries}次): {e}")
+                return np.zeros(1024).tolist()
         except Exception as e:
             print(f"[MotionAnalyzer] 获取 SiliconFlow embedding 时出错: {e}")
             return np.zeros(1024).tolist()
@@ -125,32 +144,57 @@ class MotionAnalyzer:
 
     def analyze_text(self, text):
         if not text:
+            print("[MotionAnalyzer] 文本为空，返回None")
             return None
 
-        target_embedding = self.get_openai_embedding(text)
-        if target_embedding is None:
-            target_embedding = np.zeros(1024).tolist()
+    def analyze_text(self, text):
+        if not text:
+            print("[MotionAnalyzer] 文本为空，返回None")
+            return None
 
-        best_motion = None
-        highest_score = -1
-        
-        motion_scores = []
-        for i in range(len(self.Bot_motions)):
-            # print(f"[MotionAnalyzer] 计算动作 '{self.Bot_motions[i]}' 的相似度...")
-            similarity = self.cosine_similarity(target_embedding, self.motion_vectors[i])
-            motion_scores.append((self.Bot_motions[i], similarity))
-            if similarity > highest_score:
-                highest_score = similarity
-                best_motion = self.Bot_motions[i]
+        try:
+            print(f"[MotionAnalyzer] 开始分析文本: '{text[:100]}'...", flush=True)
+            target_embedding = self.get_openai_embedding(text)
+            print(f"[MotionAnalyzer] 获取embedding完成，类型: {type(target_embedding)}", flush=True)
+            
+            if target_embedding is None:
+                print("[MotionAnalyzer] Embedding为None，使用零向量", flush=True)
+                target_embedding = np.zeros(1024).tolist()
+            
+            # Check if embedding is zero vector (API failure or fallback)
+            is_zero_vector = all(v == 0.0 for v in target_embedding) if isinstance(target_embedding, (list, np.ndarray)) else False
+            if is_zero_vector:
+                print("[MotionAnalyzer] 警告: Embedding是零向量，可能API请求失败或降级处理", flush=True)
 
-        motion_scores.sort(key=lambda x: x[1], reverse=True)
-        # print("[MotionAnalyzer] 相似度前3的动作：")
-        # for idx, (motion, score) in enumerate(motion_scores[:3], 1):
-        #     print(f"[MotionAnalyzer] 第{idx}名：【{motion}】 (得分: {score:.4f})")
+            best_motion = None
+            highest_score = -1
+            
+            motion_scores = []
+            print(f"[MotionAnalyzer] 开始计算相似度，共有 {len(self.Bot_motions)} 个动作...", flush=True)
+            for i in range(len(self.Bot_motions)):
+                # print(f"[MotionAnalyzer] 计算动作 '{self.Bot_motions[i]}' 的相似度...")
+                similarity = self.cosine_similarity(target_embedding, self.motion_vectors[i])
+                motion_scores.append((self.Bot_motions[i], similarity))
+                if similarity > highest_score:
+                    highest_score = similarity
+                    best_motion = self.Bot_motions[i]
 
-        if best_motion:
-            print(f"[MotionAnalyzer] 语义匹配成功: 【{best_motion}】 (得分: {highest_score:.4f})")
-            return best_motion
+            motion_scores.sort(key=lambda x: x[1], reverse=True)
+            # print("[MotionAnalyzer] 相似度前3的动作：")
+            # for idx, (motion, score) in enumerate(motion_scores[:3], 1):
+            #     print(f"[MotionAnalyzer] 第{idx}名：【{motion}】 (得分: {score:.4f})")
+
+            if best_motion:
+                print(f"[MotionAnalyzer] ✅ 语义匹配成功: 【{best_motion}】 (得分: {highest_score:.4f})", flush=True)
+                return best_motion
+            else:
+                print(f"[MotionAnalyzer] ❌ 无有效匹配，最高相似度: {highest_score:.4f}", flush=True)
+                return None
+        except Exception as e:
+            print(f"[MotionAnalyzer] ❌ analyze_text() 异常: {type(e).__name__}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return None
 
     def translate_zh2en(self, text):
         if not text:
