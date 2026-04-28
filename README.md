@@ -143,11 +143,9 @@ python main.py
 
 - `DEEPSEEK_API_KEY`：`core/chat.py` 读取。
 
-## 已知注意事项
+## 待优化项
 
-- `configs/system_prompt.txt` 当前存在 Git 冲突标记（`<<<<<<<`、`=======`、`>>>>>>>`），需要先清理，否则提示词内容不确定。
 - `tool/get_vectors.py` 中有硬编码 API Key 字符串，不建议保留在仓库中。
-- `core/doubao_live_s2s.py` 中 `API_APP_KEY` 为硬编码常量，涉及部署时建议改为环境变量。
 - `USE_GEMINI_LIVE_S2S` 命名与实际服务不一致，仅为历史兼容开关。
 - `temp/` 与 `conversation_logs/` 会持续增长，建议定期清理。
 - `core/audio_stream.py` 对输入设备索引和采样参数有较强耦合，旧链路下跨设备兼容性需实机验证。
