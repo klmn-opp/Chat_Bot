@@ -1,6 +1,7 @@
 import threading
 import os
 import time
+import subprocess
 from datetime import datetime
 from typing import Callable, Optional
 from core.audio_stream import AudioStreamProcessor
@@ -151,13 +152,28 @@ class StreamController:
                     return
 
                 print(f"🤖 [Motion Control] AI回复拆分出 {len(valid_sentences)} 个有效句子，开始逐个匹配动作...")
+                print(f"[DEBUG] 拆分后的句子列表: {valid_sentences}", flush=True)
                 last_action = None
 
                 for idx, sentence in enumerate(valid_sentences, 1):
+                    print(f"\n[DEBUG] ===== 开始处理第 {idx}/{len(valid_sentences)} 句 =====", flush=True)
+                    
+                    # Add a small delay between requests to avoid API rate limiting on rapid consecutive calls
+                    if idx > 1:
+                        delay_time = 0.3
+                        print(f"[DEBUG] 第{idx}句: 等待 {delay_time}秒 避免API速率限制...", flush=True)
+                        time.sleep(delay_time)
+                        print(f"[DEBUG] 第{idx}句: 延迟完成，继续处理", flush=True)
+                    
                     YELLOW = "\033[33m"
                     RESET = "\033[0m"
                     print(f"\n🤖 [Motion Control] 处理第{idx}句：{YELLOW}{sentence}{RESET}")
+                    # Debug: show exact sentence payload and length passed to analyzer
+                    print(f"[Dispatch] sentence #{idx}: '{sentence}' (len={len(sentence)})", flush=True)
+                    
+                    print(f"[DEBUG] 开始调用 motion_analyzer.analyze_text()...", flush=True)
                     matched_action = self.motion_analyzer.analyze_text(sentence)
+                    print(f"[DEBUG] analyze_text() 返回结果: {matched_action}", flush=True)
 
                     if matched_action:
                         print(f"matched_action: {matched_action}, last_action: {last_action}")
@@ -165,7 +181,17 @@ class StreamController:
                             print(f"⏭️ [Motion Control] 第{idx}句动作【{matched_action}】与上一句相同，跳过发送")
                         else:
                             cmd = f'ros2 topic pub -1 /arm_command std_msgs/msg/String "{{data: \'{matched_action}\'}}" > /dev/null 2>&1'
-                            os.system(cmd)
+                            print(f"[DEBUG] 第{idx}句: 关于执行ROS2命令: {cmd}", flush=True)
+                            # Execute in subprocess to avoid blocking
+                            try:
+                                print(f"[DEBUG] 第{idx}句: 使用Popen执行ROS2命令...", flush=True)
+                                proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                print(f"[DEBUG] 第{idx}句: 进程已启动 (PID={proc.pid})", flush=True)
+                                # 不等待进程完成，继续处理下一句
+                                print(f"[DEBUG] 第{idx}句: ROS2命令已异步发送，继续处理", flush=True)
+                            except Exception as cmd_err:
+                                print(f"[DEBUG] 第{idx}句: ROS2命令执行异常: {cmd_err}", flush=True)
+                            
                             RED = "\033[31m"
                             RESET = "\033[0m"
                             print(f"🚀 [Robot Control] 第{idx}句已发送动作指令: {RED}{matched_action}{RESET}", flush=True)
@@ -173,11 +199,19 @@ class StreamController:
                     else:
                         print(f"⚠️ [Motion Control] 第{idx}句无匹配动作")
                         last_action = None
+                    
+                    print(f"[DEBUG] ===== 完成第 {idx}/{len(valid_sentences)} 句 =====\n", flush=True)
+
+                print(f"[DEBUG] 所有 {len(valid_sentences)} 句处理完毕！", flush=True)
 
             except Exception as e:
-                print(f"⚠️ 动作执行失败: {e}", flush=True)
+                print(f"⚠️ 动作执行失败: {type(e).__name__}: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
 
-        threading.Thread(target=run_motion_bridge, daemon=True).start()
+        # 使用非daemon线程，确保线程完成
+        motion_thread = threading.Thread(target=run_motion_bridge, daemon=False)
+        motion_thread.start()
 
     def _on_live_ai_final(self, response: str):
         with self._state_lock:
