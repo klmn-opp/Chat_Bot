@@ -394,36 +394,55 @@ class MedicalRobotStreamUI:
     # 回调函数处理
     def on_state_change(self, new_state, data):
         """状态变化回调"""
-        self.current_state = new_state
-        self.update_ui_state(new_state)
+        self._run_on_ui_thread(lambda: self._apply_state_change(new_state))
     
     def on_realtime_transcription(self, text, is_final):
         """实时转录回调"""
         if not is_final:
-            self.realtime_display.show_realtime_text(text)
+            self._run_on_ui_thread(lambda: self.realtime_display.show_realtime_text(text))
     
     def on_final_result(self, text):
         """最终识别结果回调"""
-        timestamp = self.conversation_manager._get_timestamp()
-        self.realtime_display.confirm_final_text(text, "user", timestamp)
-        self.conversation_manager.finalize_user_input(text)
+        self._run_on_ui_thread(lambda: self._apply_final_result(text))
     
     def on_ai_response(self, response):
         """AI响应回调"""
-        timestamp = self.conversation_manager._get_timestamp()
-        self.realtime_display.confirm_final_text(response, "ai", timestamp)
-        self.conversation_manager.add_ai_response(response)
+        self._run_on_ui_thread(lambda: self._apply_ai_response(response))
     
     def on_error(self, error):
         """错误回调"""
-        self.realtime_display.add_system_message(f"错误: {error}")
-        self.current_state = "idle"
-        self.update_ui_state("idle")
+        self._run_on_ui_thread(lambda: self._apply_error(error))
     
     def on_ui_update(self, event_type, data):
         """UI更新回调"""
         # 处理来自ConversationManager的UI更新事件
         pass
+
+    def _run_on_ui_thread(self, func):
+        """确保Tk相关操作都在主线程执行。"""
+        if threading.current_thread() is threading.main_thread():
+            func()
+        else:
+            self.root.after(0, func)
+
+    def _apply_state_change(self, new_state):
+        self.current_state = new_state
+        self.update_ui_state(new_state)
+
+    def _apply_final_result(self, text):
+        timestamp = self.conversation_manager._get_timestamp()
+        self.realtime_display.confirm_final_text(text, "user", timestamp)
+        self.conversation_manager.finalize_user_input(text)
+
+    def _apply_ai_response(self, response):
+        timestamp = self.conversation_manager._get_timestamp()
+        self.realtime_display.confirm_final_text(response, "ai", timestamp)
+        self.conversation_manager.add_ai_response(response)
+
+    def _apply_error(self, error):
+        self.realtime_display.add_system_message(f"错误: {error}")
+        self.current_state = "idle"
+        self.update_ui_state("idle")
     
     def _on_controller_state_change(self, new_state, data):
         """
@@ -431,11 +450,13 @@ class MedicalRobotStreamUI:
         只有 Controller 能调用这个方法来改变 UI 显示
         UI 绝不主动调用这个方法
         """
-        print(f"📥 [Controller→UI] 状态更新: {data.get('old_state', '?')} → {new_state}")
-        
-        # ✅ 只更新 UI 自己的显示变量，不动 Controller 的任何东西
-        self.current_state = new_state
-        self.update_ui_state(new_state)
+        def _apply():
+            print(f"📥 [Controller→UI] 状态更新: {data.get('old_state', '?')} → {new_state}")
+            # ✅ 只更新 UI 自己的显示变量，不动 Controller 的任何东西
+            self.current_state = new_state
+            self.update_ui_state(new_state)
+
+        self._run_on_ui_thread(_apply)
 
     def update_ui_state(self, state):
         """更新UI状态显示"""
