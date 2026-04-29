@@ -10,6 +10,7 @@ from core.tts import TextToSpeech
 from ui.components.audio_player import AudioPlayer
 from core.motion_analyzer import MotionAnalyzer
 from core.doubao_live_s2s import DoubaoLiveS2SBridge
+from core.vision_capture import VisionCapture
 
 
 # 注意：这里不再需要 import rclpy，避免版本冲突
@@ -51,6 +52,11 @@ class StreamController:
             self.tts = TextToSpeech(audio_stream=self.audio_stream, audio_player=None)
 
         self.motion_analyzer = MotionAnalyzer()
+        self.vision_capture = VisionCapture()
+
+        self.vision_trigger_phrase = os.getenv("VISION_TRIGGER_PHRASE", "启动相机查看")
+        self.vision_followup_enabled = os.getenv("VISION_FOLLOWUP_ENABLED", "1") == "1"
+        self._vision_followup_inflight = False
         
         # 线程锁（保护共享状态）
         self._lock = threading.Lock()  # 用于保护共享状态的锁
@@ -214,6 +220,85 @@ class StreamController:
         motion_thread = threading.Thread(target=run_motion_bridge, daemon=False)
         motion_thread.start()
 
+    def _response_requests_vision(self, response: str) -> bool:
+        return bool(response and self.vision_trigger_phrase and self.vision_trigger_phrase in response)
+
+    def _build_vision_followup_prompt(self, vision_summary: str, original_response: str) -> str:
+        return (
+            "你已经根据用户意图给出了一句带有视觉触发词的回复。\n"
+            f"视觉触发词：{self.vision_trigger_phrase}\n"
+            f"机器人相机返回的信息：{vision_summary}\n\n"
+            f"原始回复：{original_response}\n\n"
+            "请结合视觉信息，直接给出面向用户的最终回答。"
+        )
+
+    def _query_ai_with_vision_context(self, prompt: str):
+        try:
+            bot = self.chat_bot or ChatBot()
+        except Exception as exc:
+            print(f"❌ 视觉补问AI初始化失败: {exc}", flush=True)
+            if self.on_error:
+                self.on_error(str(exc))
+            return
+
+        if self.use_live_s2s and self.chat_bot is None:
+            # 实时链路下临时补问，避免依赖 live bridge 的音频输入。
+            bot = ChatBot()
+
+        def _callback(success: bool, response: str = None, error: str = None):
+            if not success or not response:
+                print(f"❌ 视觉补问失败: {error}", flush=True)
+                if self.on_error:
+                    self.on_error(error or "视觉补问失败")
+                return
+
+            print(f"🧠 视觉补问AI响应: {response}", flush=True)
+            if self.on_ai_response:
+                self.on_ai_response(response)
+            self._save_conversation_to_file(self.current_user_text, response)
+
+            if not self.use_live_s2s:
+                try:
+                    self._dispatch_motion_for_response(response)
+                    self._speak_response(response)
+                except Exception as exc:
+                    print(f"❌ 视觉补问播报失败: {exc}", flush=True)
+
+        try:
+            vision_system_prompt = self.system_prompt + "\n\n请基于用户上下文和视觉结果回答。"
+            bot.chat_with_ai(prompt, vision_system_prompt, callback=_callback)
+        except Exception as exc:
+            print(f"❌ 发送视觉补问失败: {exc}", flush=True)
+            if self.on_error:
+                self.on_error(str(exc))
+
+    def _handle_vision_followup(self, response: str):
+        if not self.vision_followup_enabled or not self._response_requests_vision(response):
+            return
+
+        with self._state_lock:
+            if self._vision_followup_inflight:
+                return
+            self._vision_followup_inflight = True
+
+        def run_vision_followup():
+            try:
+                print(f"🔎 检测到视觉触发词，开始采集 {self.vision_capture.topic} 的返回结果...", flush=True)
+                vision_data = self.vision_capture.capture()
+                vision_summary = vision_data.get("summary_text") or "未获取到有效视觉信息。"
+                followup_prompt = self._build_vision_followup_prompt(vision_summary, response)
+                print(f"🔎 视觉摘要: {vision_summary}", flush=True)
+                self._query_ai_with_vision_context(followup_prompt)
+            except Exception as exc:
+                print(f"❌ 视觉采集/补问失败: {exc}", flush=True)
+                if self.on_error:
+                    self.on_error(str(exc))
+            finally:
+                with self._state_lock:
+                    self._vision_followup_inflight = False
+
+        threading.Thread(target=run_vision_followup, daemon=True).start()
+
     def _on_live_ai_final(self, response: str):
         with self._state_lock:
             if not response:
@@ -221,6 +306,7 @@ class StreamController:
 
             print(f"\n\n💬 AI响应: {response}", flush=True)
             self._dispatch_motion_for_response(response)
+            self._handle_vision_followup(response)
 
             if self.on_ai_response:
                 self.on_ai_response(response)
@@ -261,6 +347,7 @@ class StreamController:
             if success and response:
                 print(f"\n\n💬 AI响应: {response}", flush=True)
                 self._dispatch_motion_for_response(response)
+                self._handle_vision_followup(response)
 
                 # 原有流程：回调+保存对话
                 if self.on_ai_response:
