@@ -22,6 +22,8 @@ class VisionCapture:
             "source ~/yolo_ws/install/setup.bash",
         )
         self.timeout_sec = float(timeout_sec or os.getenv("VISION_CAPTURE_TIMEOUT_SEC", "8"))
+        self.retry_count = max(1, int(os.getenv("VISION_CAPTURE_RETRY_COUNT", "2")))
+        self.retry_backoff_sec = float(os.getenv("VISION_CAPTURE_RETRY_BACKOFF_SEC", "2"))
 
     def capture(self) -> Dict[str, object]:
         print(
@@ -31,30 +33,48 @@ class VisionCapture:
         command = f"{self.setup_command} && ros2 topic echo {shlex.quote(self.topic)} --once"
         print(f"[VisionCapture] 2/4 即将执行命令: {command}", flush=True)
 
-        try:
-            completed = subprocess.run(
-                ["bash", "-lc", command],
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_sec,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = (exc.stdout or "").strip()
-            stderr = (exc.stderr or "").strip()
+        completed = None
+        timeout_error = ""
+        for attempt in range(1, self.retry_count + 1):
+            attempt_timeout = self.timeout_sec + ((attempt - 1) * self.retry_backoff_sec)
             print(
-                f"[VisionCapture] 3/4 采集超时: timeout={self.timeout_sec}s, stdout_len={len(stdout)}, stderr_len={len(stderr)}",
+                f"[VisionCapture] 2.{attempt}/4 采集尝试: timeout={attempt_timeout}s",
                 flush=True,
             )
+            try:
+                completed = subprocess.run(
+                    ["bash", "-lc", command],
+                    capture_output=True,
+                    text=True,
+                    timeout=attempt_timeout,
+                    check=False,
+                )
+                break
+            except subprocess.TimeoutExpired as exc:
+                stdout = (exc.stdout or "").strip()
+                stderr = (exc.stderr or "").strip()
+                timeout_error = (
+                    f"Vision capture timed out after {attempt_timeout:.1f}s (attempt {attempt}/{self.retry_count})"
+                )
+                print(
+                    f"[VisionCapture] 3/4 采集超时: attempt={attempt}/{self.retry_count}, timeout={attempt_timeout}s, stdout_len={len(stdout)}, stderr_len={len(stderr)}",
+                    flush=True,
+                )
+
+        if completed is None:
+            diag_text = self._diagnose_topic_status()
+            final_stderr = timeout_error
+            if diag_text:
+                final_stderr = f"{timeout_error}; {diag_text}" if timeout_error else diag_text
             return {
                 "topic": self.topic,
                 "command": command,
                 "returncode": None,
-                "raw_text": stdout,
-                "stderr": stderr or f"Vision capture timed out after {self.timeout_sec}s",
+                "raw_text": "",
+                "stderr": final_stderr or f"Vision capture timed out after {self.timeout_sec}s",
                 "frame_id": None,
                 "detections": [],
-                "summary_text": "视觉采集超时，未获取到结果。",
+                "summary_text": "视觉采集超时，未获取到结果。可能原因：当前时段无新消息发布或发布频率较低。",
                 "timeout": True,
             }
 
@@ -193,6 +213,30 @@ class VisionCapture:
             "detections": detections,
             "summary_text": summary_text,
         }
+
+    def _diagnose_topic_status(self) -> str:
+        diag_command = f"{self.setup_command} && ros2 topic info {shlex.quote(self.topic)}"
+        try:
+            completed = subprocess.run(
+                ["bash", "-lc", diag_command],
+                capture_output=True,
+                text=True,
+                timeout=4.0,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return "topic info 诊断超时"
+
+        output = (completed.stdout or "") + "\n" + (completed.stderr or "")
+        output = output.strip()
+        if not output:
+            return "topic info 无输出"
+
+        publishers = re.search(r"Publisher count:\s*(\d+)", output)
+        subscribers = re.search(r"Subscription count:\s*(\d+)", output)
+        publisher_count = publishers.group(1) if publishers else "未知"
+        subscriber_count = subscribers.group(1) if subscribers else "未知"
+        return f"topic info: Publisher={publisher_count}, Subscription={subscriber_count}"
 
     def _parse_detections(self, raw_text: str) -> List[Dict[str, object]]:
         detections: List[Dict[str, object]] = []
