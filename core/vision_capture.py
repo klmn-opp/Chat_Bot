@@ -2,6 +2,8 @@ import os
 import re
 import shlex
 import subprocess
+import itertools
+import math
 from typing import Dict, List, Optional
 
 
@@ -85,72 +87,104 @@ class VisionCapture:
         frame_id_match = re.search(r"frame_id:\s*([^\n]+)", raw_text)
         frame_id = frame_id_match.group(1).strip() if frame_id_match else None
 
-        class_names = [match.strip() for match in re.findall(r"class_name:\s*([^\n]+)", raw_text)]
-        class_ids = [match.strip() for match in re.findall(r"class_id:\s*([^\n]+)", raw_text)]
-        scores = [match.strip() for match in re.findall(r"score:\s*([^\n]+)", raw_text)]
-
-        detections: List[Dict[str, Optional[str]]] = []
-        for index, class_name in enumerate(class_names):
-            detections.append(
-                {
-                    "class_name": class_name,
-                    "class_id": class_ids[index] if index < len(class_ids) else None,
-                    "score": scores[index] if index < len(scores) else None,
-                }
-            )
-
-        def _extract_position_hint(block_text: str) -> str:
-            block_lower = block_text.lower()
-
-            if "left" in block_lower or "左" in block_text:
-                return "左侧"
-            if "right" in block_lower or "右" in block_text:
-                return "右侧"
-            if "center" in block_lower or "middle" in block_lower or "中" in block_text:
-                return "中间"
-            if "front" in block_lower or "前" in block_text:
-                return "前方"
-            if "back" in block_lower or "behind" in block_lower or "后" in block_text:
-                return "后方"
-
-            x_match = re.search(r"x\s*[:=]\s*([-+]?\d+(?:\.\d+)?)", block_text, re.IGNORECASE)
-            if x_match:
-                try:
-                    x_value = float(x_match.group(1))
-                    if x_value < -0.2:
-                        return "左侧"
-                    if x_value > 0.2:
-                        return "右侧"
-                    return "中间"
-                except ValueError:
-                    pass
-
-            return "方位未明确"
+        detections = self._parse_detections(raw_text)
 
         if detections:
-            # 尽量在原始输出中为每个目标提取一段上下文，帮助判断方位。
-            lines = raw_text.splitlines()
-            item_lines: List[str] = []
-            for detection in detections[:6]:
-                class_name = detection["class_name"] or "未知目标"
-                related_block = ""
-                for idx, line in enumerate(lines):
-                    if class_name in line:
-                        start = max(0, idx - 2)
-                        end = min(len(lines), idx + 8)
-                        related_block = "\n".join(lines[start:end])
-                        break
-                position = _extract_position_hint(related_block or raw_text)
-                item = class_name
-                if detection.get("score"):
-                    item += f"({detection['score']})"
-                item_lines.append(f"{item}，{position}")
+            min_score = float(os.getenv("VISION_MIN_SCORE", "0.5"))
+            accepted = [d for d in detections if (d.get("score_value") or 0.0) >= min_score]
+            rejected = [d for d in detections if d not in accepted]
 
-            summary_text = (
-                f"在当前相机画面中检测到 {len(detections)} 个目标："
-                + "；".join(item_lines)
-                + "。"
-            )
+            semantic_lines: List[str] = []
+            for det in accepted[:6]:
+                class_name = det.get("class_name") or "未知目标"
+                score_value = det.get("score_value")
+                if score_value is None:
+                    semantic_lines.append(f"系统检测到 {class_name}，置信度未知。")
+                    continue
+                percent = int(round(score_value * 100))
+                confidence_tag = self._confidence_tag(score_value)
+                semantic_lines.append(
+                    f"系统 {percent}% 确定检测到 {class_name}（{confidence_tag}）。"
+                )
+
+            spatial_lines: List[str] = []
+            physical_lines: List[str] = []
+            for det in accepted[:6]:
+                class_name = det.get("class_name") or "未知目标"
+                position = det.get("position") or {}
+                size = det.get("size") or {}
+                x = position.get("x")
+                y = position.get("y")
+                z = position.get("z")
+
+                if None not in (x, y, z):
+                    spatial_lines.append(
+                        f"{class_name}: x={x:.3f}m（前方约 {abs(x):.2f}m），"
+                        f"y={y:.3f}m（{self._describe_lateral(y)}，约 {abs(y) * 100:.1f}cm），"
+                        f"z={z:.3f}m（{self._describe_vertical(z)}）。"
+                    )
+
+                    distance_m = math.sqrt((x * x) + (y * y) + (z * z))
+                    det["distance_m"] = round(distance_m, 4)
+                else:
+                    spatial_lines.append(f"{class_name}: 缺少完整 bbox3d 坐标，无法判断精确空间位置。")
+
+                sx = size.get("x") if isinstance(size, dict) else None
+                sy = size.get("y") if isinstance(size, dict) else None
+                sz = size.get("z") if isinstance(size, dict) else None
+                distance_text = (
+                    f"直线距离约 {det['distance_m']:.3f}m"
+                    if det.get("distance_m") is not None
+                    else "直线距离未知"
+                )
+                if None not in (sx, sy, sz):
+                    physical_lines.append(
+                        f"{class_name}: {distance_text}，尺寸约 {sx * 100:.1f}cm x {sy * 100:.1f}cm x {sz * 100:.1f}cm。"
+                    )
+                else:
+                    physical_lines.append(f"{class_name}: {distance_text}，尺寸信息不完整。")
+
+            topology_line = ""
+            pair_candidates: List[tuple] = []
+            for first, second in itertools.combinations(accepted[:6], 2):
+                p1 = first.get("position") or {}
+                p2 = second.get("position") or {}
+                if None in (p1.get("x"), p1.get("y"), p1.get("z"), p2.get("x"), p2.get("y"), p2.get("z")):
+                    continue
+                dx = p1["x"] - p2["x"]
+                dy = p1["y"] - p2["y"]
+                dz = p1["z"] - p2["z"]
+                pair_dist = math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+                pair_candidates.append((pair_dist, first, second))
+
+            if pair_candidates:
+                pair_candidates.sort(key=lambda item: item[0])
+                nearest_dist, nearest_a, nearest_b = pair_candidates[0]
+                topology_line = (
+                    f"目标间关系：{nearest_a.get('class_name', '目标A')} 与 "
+                    f"{nearest_b.get('class_name', '目标B')} 的中心间距约 {nearest_dist:.3f}m。"
+                )
+
+            filtered_text = ""
+            if rejected:
+                ignored_names = [item.get("class_name") or "未知目标" for item in rejected[:4]]
+                filtered_text = (
+                    f"低于阈值 {min_score:.2f} 的目标已忽略：" + "、".join(ignored_names) + "。"
+                )
+
+            summary_parts = [f"视觉检测到 {len(detections)} 个目标，其中有效目标 {len(accepted)} 个。"]
+            if semantic_lines:
+                summary_parts.append("1) 语义信息：" + " ".join(semantic_lines))
+            if spatial_lines:
+                summary_parts.append("2) 空间定位：" + " ".join(spatial_lines))
+            if physical_lines:
+                summary_parts.append("3) 距离与尺寸：" + " ".join(physical_lines))
+            if topology_line:
+                summary_parts.append("4) 拓扑关系：" + topology_line)
+            if filtered_text:
+                summary_parts.append(filtered_text)
+
+            summary_text = "\n".join(summary_parts)
         else:
             summary_text = raw_text[:1200] if raw_text else "未捕获到有效的 /yolo/detections_3d 输出。"
 
@@ -159,3 +193,94 @@ class VisionCapture:
             "detections": detections,
             "summary_text": summary_text,
         }
+
+    def _parse_detections(self, raw_text: str) -> List[Dict[str, object]]:
+        detections: List[Dict[str, object]] = []
+
+        block_pattern = re.compile(
+            r"(?ms)^- class_id:\s*(?P<class_id>[^\n]+)\n(?P<body>.*?)(?=^- class_id:|\n---|\Z)"
+        )
+        for match in block_pattern.finditer(raw_text):
+            class_id = (match.group("class_id") or "").strip()
+            body = match.group("body") or ""
+
+            class_name_match = re.search(r"^\s*class_name:\s*([^\n]+)", body, re.MULTILINE)
+            score_match = re.search(r"^\s*score:\s*([^\n]+)", body, re.MULTILINE)
+            class_name = class_name_match.group(1).strip() if class_name_match else None
+            score = score_match.group(1).strip() if score_match else None
+            score_value = self._safe_float(score)
+
+            bbox3d_section_match = re.search(r"bbox3d:\s*\n(?P<section>.*?)(?:\n\s*mask:|\Z)", body, re.S)
+            bbox3d_section = bbox3d_section_match.group("section") if bbox3d_section_match else ""
+
+            position_match = re.search(
+                r"position:\s*\n\s*x:\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\n"
+                r"\s*y:\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\n"
+                r"\s*z:\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)",
+                bbox3d_section,
+            )
+            size_match = re.search(
+                r"size:\s*\n\s*x:\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\n"
+                r"\s*y:\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\n"
+                r"\s*z:\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)",
+                bbox3d_section,
+            )
+
+            position = {
+                "x": self._safe_float(position_match.group(1)) if position_match else None,
+                "y": self._safe_float(position_match.group(2)) if position_match else None,
+                "z": self._safe_float(position_match.group(3)) if position_match else None,
+            }
+            size = {
+                "x": self._safe_float(size_match.group(1)) if size_match else None,
+                "y": self._safe_float(size_match.group(2)) if size_match else None,
+                "z": self._safe_float(size_match.group(3)) if size_match else None,
+            }
+
+            detections.append(
+                {
+                    "class_name": class_name,
+                    "class_id": class_id or None,
+                    "score": score,
+                    "score_value": score_value,
+                    "position": position,
+                    "size": size,
+                }
+            )
+
+        return detections
+
+    @staticmethod
+    def _safe_float(value: Optional[str]) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _confidence_tag(score_value: float) -> str:
+        if score_value >= 0.9:
+            return "高置信"
+        if score_value >= 0.75:
+            return "较高置信"
+        if score_value >= 0.5:
+            return "中等置信"
+        return "低置信"
+
+    @staticmethod
+    def _describe_lateral(y_value: float) -> str:
+        if y_value > 0.08:
+            return "偏左"
+        if y_value < -0.08:
+            return "偏右"
+        return "基本居中"
+
+    @staticmethod
+    def _describe_vertical(z_value: float) -> str:
+        if z_value > 0.08:
+            return "高于相机"
+        if z_value < -0.08:
+            return "低于相机"
+        return "与相机高度接近"
