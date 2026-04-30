@@ -156,6 +156,8 @@ class DoubaoLiveS2SBridge:
 		self._source_channels = 1
 
 		self._audio_out_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=120)
+		# Buffered outgoing event frames (used before websocket loop starts)
+		self._pending_events = []
 		# Doubao server auto-assigns sequence for StartConnection(1) and StartSession(2),
 		# so first audio frame should start at sequence=3.
 		self._seq = 3
@@ -438,8 +440,59 @@ class DoubaoLiveS2SBridge:
 		frame.extend(audio_payload)
 		return bytes(frame)
 
+	# Outgoing event queue: used to send TaskRequest events (text) from other threads
+	def send_text_task(self, text: str) -> bool:
+		"""Send a TaskRequest text payload into the active live session.
+		If the live session is running, the payload is queued and will be sent on the websocket thread.
+		This is thread-safe and safe to call from non-async code.
+		"""
+		if not text:
+			return False
+		try:
+			payload = json.dumps({"dialog": {"text": text}}, ensure_ascii=False).encode("utf-8")
+			frame = self._build_event_frame(
+				event_id=self._EV_TASK_REQUEST,
+				payload=payload,
+				include_session_id=True,
+				include_connect_id=False,
+				serialization=self._SER_JSON,
+			)
+			# If event queue exists in running loop, schedule put; otherwise buffer locally.
+			if getattr(self, "_out_event_queue", None) is not None and self._loop is not None and self._loop.is_running():
+				fut = asyncio.run_coroutine_threadsafe(self._out_event_queue.put(frame), self._loop)
+				try:
+					fut.result(timeout=2)
+				except Exception:
+					return False
+			else:
+				# buffer until session starts
+				if not hasattr(self, "_pending_events"):
+					self._pending_events = []
+				self._pending_events.append(frame)
+			return True
+		except Exception:
+			return False
+
+	async def _out_event_loop(self, ws: websockets.WebSocketClientProtocol) -> None:
+		"""Coroutine that drains `_out_event_queue` and sends frames to websocket."""
+		self._debug("out event loop started")
+		while not self._stop_event.is_set():
+			try:
+				frame = await asyncio.wait_for(self._out_event_queue.get(), timeout=0.25)
+			except asyncio.TimeoutError:
+				await asyncio.sleep(0.01)
+				continue
+			try:
+				await ws.send(frame)
+			except Exception as exc:
+				self._debug(f"out event send failed: {exc}")
+				# swallow and continue
+
 	@staticmethod
 	def _read_i32(data: bytes, offset: int) -> tuple[int, int]:
+		if len(data) < offset + 4:
+			raise ValueError("Not enough bytes for i32")
+		return struct.unpack(">i", data[offset : offset + 4])[0], offset + 4
 		if len(data) < offset + 4:
 			raise ValueError("Not enough bytes for i32")
 		return struct.unpack(">i", data[offset : offset + 4])[0], offset + 4
@@ -830,7 +883,16 @@ class DoubaoLiveS2SBridge:
 				recv_task = asyncio.create_task(self._recv_loop(ws))
 				send_task = asyncio.create_task(self._send_audio_loop(ws, input_stream))
 				play_task = asyncio.create_task(self._play_audio_loop(output_stream))
-				self._debug("all loops started (recv/send/play)")
+
+				# Prepare outgoing event queue for task requests (text) and drain any pending buffers.
+				self._out_event_queue = asyncio.Queue()
+				if hasattr(self, "_pending_events") and self._pending_events:
+					for f in self._pending_events:
+						await self._out_event_queue.put(f)
+					self._pending_events = []
+
+				out_task = asyncio.create_task(self._out_event_loop(ws))
+				self._debug("all loops started (recv/send/play/out)")
 				last_heartbeat = time.monotonic()
 
 				try:
@@ -848,6 +910,7 @@ class DoubaoLiveS2SBridge:
 							("recv", recv_task),
 							("send", send_task),
 							("play", play_task),
+							("out", out_task),
 						):
 							if task.done():
 								exc = None
@@ -859,18 +922,16 @@ class DoubaoLiveS2SBridge:
 									self._debug(f"{loop_name} loop exited with exception: {exc}")
 									if self.on_error:
 										self.on_error(f"Doubao {loop_name} loop failed: {exc}")
-								else:
-									self._debug(f"{loop_name} loop exited unexpectedly without exception")
-								self._stop_event.set()
-								break
+									else:
+										self._debug(f"{loop_name} loop exited unexpectedly without exception")
+									self._stop_event.set()
+									break
 				finally:
 					send_task.cancel()
 					play_task.cancel()
+					out_task.cancel()
 					recv_task.cancel()
-					await asyncio.gather(send_task, play_task, recv_task, return_exceptions=True)
-					self._debug("loops cancelled and joined")
-
-					# End current session and close websocket gracefully.
+					await asyncio.gather(send_task, play_task, out_task, recv_task, return_exceptions=True)
 					try:
 						await ws.send(self._build_finish_session())
 						self._debug("FinishSession sent")

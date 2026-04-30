@@ -297,6 +297,24 @@ class StreamController:
 
     def _query_ai_with_vision_context(self, prompt: str):
         self._debug_vision_followup(f"正在初始化视觉补问AI，prompt_len={len(prompt)}")
+
+        # Live S2S: send the prompt as a TaskRequest into the ongoing Doubao live session
+        if self.use_live_s2s:
+            try:
+                if self.live_s2s_bridge is None:
+                    self._create_live_bridge()
+                if not getattr(self.live_s2s_bridge, "_started", False):
+                    self.live_s2s_bridge.start()
+                self._debug_vision_followup("通过 Doubao Live S2S 发送视觉补问（文本）到同一会话")
+                self.live_s2s_bridge.send_text_task(prompt)
+                return
+            except Exception as exc:
+                self._debug_vision_followup(f"❌ 通过Live S2S发送视觉补问失败: {type(exc).__name__}: {exc}")
+                if self.on_error:
+                    self.on_error(str(exc))
+                # fallback to non-live path
+
+        # Fallback: use shared ChatBot (旧链路行为)
         try:
             bot = self._get_shared_chat_bot()
         except Exception as exc:
